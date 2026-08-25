@@ -388,7 +388,8 @@ ORDER_CHRONO = " ORDER BY (a.published_at IS NULL), a.published_at ASC, a.source
 ORDER_CHRONO_DESC = " ORDER BY (a.published_at IS NULL), a.published_at DESC, a.source_order DESC, a.id DESC"
 
 
-def _filter_sql(scope: str, include_disabled: bool) -> tuple[str, list]:
+def _filter_sql(scope: str, include_disabled: bool,
+                hide_read: bool = False) -> tuple[str, list]:
     where = ["a.content_status IN ('ok','partial','paywalled')"]
     args: list[Any] = []
     if not include_disabled:
@@ -399,13 +400,17 @@ def _filter_sql(scope: str, include_disabled: bool) -> tuple[str, list]:
         where.append("r.read_at IS NOT NULL")
     elif scope == "favourites":
         where.append("r.favourite_at IS NOT NULL")
+    # Applies on top of the scope, so favourites can be filtered down to the
+    # ones still unread. Meaningless against the read scope itself.
+    if hide_read and scope != "read":
+        where.append("r.read_at IS NULL")
     return " WHERE " + " AND ".join(where), args
 
 
 def queue(conn, scope: str = "all", limit: int = 500, offset: int = 0,
           source_id: int | None = None, search: str | None = None,
-          newest_first: bool = False) -> list[sqlite3.Row]:
-    where, args = _filter_sql(scope, include_disabled=False)
+          newest_first: bool = False, hide_read: bool = False) -> list[sqlite3.Row]:
+    where, args = _filter_sql(scope, include_disabled=False, hide_read=hide_read)
     if source_id:
         where += " AND a.source_id=?"
         args.append(source_id)
@@ -445,12 +450,17 @@ def get_article(conn, article_id: int):
         (article_id,)).fetchone()
 
 
-def neighbour(conn, article_id: int, direction: int, scope: str = "all"):
-    """Next (+1) or previous (-1) article in the current reading order."""
+def neighbour(conn, article_id: int, direction: int, scope: str = "all",
+              hide_read: bool = False):
+    """Next (+1) or previous (-1) article in the current reading order.
+
+    Position is compared, not membership, so this still works when the article
+    you are on has just been marked read and is no longer in the filtered set.
+    """
     cur = get_article(conn, article_id)
     if cur is None:
         return None
-    where, args = _filter_sql(scope, include_disabled=False)
+    where, args = _filter_sql(scope, include_disabled=False, hide_read=hide_read)
     # Build a strict lexicographic comparison on (null-rank, published_at, source_order, id)
     nullrank = 1 if cur["published_at"] is None else 0
     pub = cur["published_at"]
@@ -470,10 +480,11 @@ def neighbour(conn, article_id: int, direction: int, scope: str = "all"):
                                    key[2], key[2], key[3]]).fetchone()
 
 
-def position_in_queue(conn, article_id: int, scope: str = "all") -> tuple[int, int]:
+def position_in_queue(conn, article_id: int, scope: str = "all",
+                      hide_read: bool = False) -> tuple[int, int]:
     """1-based position of an article in the queue, and the queue total."""
     cur = get_article(conn, article_id)
-    where, args = _filter_sql(scope, include_disabled=False)
+    where, args = _filter_sql(scope, include_disabled=False, hide_read=hide_read)
     total = conn.execute(
         "SELECT COUNT(*) c FROM articles a JOIN sources s ON s.id=a.source_id "
         "LEFT JOIN reading_state r ON r.article_id=a.id" + where, args).fetchone()["c"]

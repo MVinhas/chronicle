@@ -296,6 +296,22 @@ class TestQueue(unittest.TestCase):
         self.assertEqual(self.db.queue_counts(self.conn)["favourites"], 1)
         self.assertFalse(self.db.toggle_favourite(self.conn, aid))
 
+    def test_hide_read_applies_on_top_of_any_scope(self):
+        a = self.add("a", "2001-01-01T00:00:00")
+        self.add("b", "2002-01-01T00:00:00")
+        self.db.set_read(self.conn, a, True)
+        self.db.toggle_favourite(self.conn, a)
+
+        self.assertEqual(len(self.db.queue(self.conn)), 2)
+        self.assertEqual(len(self.db.queue(self.conn, hide_read=True)), 1)
+        # A read favourite disappears from favourites too, when hiding read.
+        self.assertEqual(len(self.db.queue(self.conn, scope="favourites")), 1)
+        self.assertEqual(
+            len(self.db.queue(self.conn, scope="favourites", hide_read=True)), 0)
+        # Against the read scope it would contradict itself, so it is ignored.
+        self.assertEqual(
+            len(self.db.queue(self.conn, scope="read", hide_read=True)), 1)
+
     def test_disabled_source_leaves_the_queue(self):
         self.add("a", "2001-01-01T00:00:00")
         self.db.set_source_enabled(self.conn, self.sid, False)

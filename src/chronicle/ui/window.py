@@ -54,6 +54,11 @@ class MainWindow(Adw.ApplicationWindow):
     def conn(self):
         return self._conn
 
+    @property
+    def hide_read(self) -> bool:
+        """Shared with the library view, so the queue and the reader agree."""
+        return db.state_get(self._conn, "hide_read", "0") == "1"
+
     @staticmethod
     def _load_css() -> None:
         provider = Gtk.CssProvider()
@@ -166,6 +171,9 @@ class MainWindow(Adw.ApplicationWindow):
     def _build_library_page(self) -> Gtk.Widget:
         self.library = LibraryView(self.conn)
         self.library.connect("article-chosen", self._on_article_chosen)
+        self.library.connect(
+            "hide-read-changed",
+            lambda *_: self._update_reader_chrome(self.current) if self.current else None)
         return self.library
 
     def _build_sources_page(self) -> Gtk.Widget:
@@ -192,6 +200,7 @@ class MainWindow(Adw.ApplicationWindow):
             ("scroll-down", lambda *_: self.reader.scroll_by_page(1), ["space"]),
             ("scroll-up", lambda *_: self.reader.scroll_by_page(-1), ["<Shift>space"]),
             ("top", lambda *_: self.reader.scroll_home(), ["Home"]),
+            ("hide-read", self.toggle_hide_read, ["h"]),
             ("cycle-theme", self.cycle_theme, ["<Control>t"]),
             ("shortcuts", self.show_shortcuts, ["<Control>question"]),
             ("about", self.show_about, []),
@@ -233,6 +242,24 @@ class MainWindow(Adw.ApplicationWindow):
     def _apply_theme(self, name: str) -> None:
         Adw.StyleManager.get_default().set_color_scheme(
             self._SCHEMES.get(name, Adw.ColorScheme.DEFAULT))
+
+    def toggle_hide_read(self, *_):
+        """Hide or show articles already read, in the queue and while reading."""
+        now = not self.hide_read
+        db.state_set(self._conn, "hide_read", "1" if now else "0")
+        if hasattr(self, "library"):
+            self.library.hide_read = now
+            self.library.hide_read_button.handler_block_by_func(
+                self.library._on_hide_read)
+            self.library.hide_read_button.set_active(now)
+            self.library.hide_read_button.handler_unblock_by_func(
+                self.library._on_hide_read)
+            self.library.reload()
+        if self.current is not None:
+            self._update_reader_chrome(self.current)
+        self.toasts.add_toast(Adw.Toast(
+            title="Hiding articles you have read" if now
+            else "Showing all articles", timeout=2))
 
     def cycle_theme(self, *_):
         """Ctrl+T steps through system -> light -> dark."""
@@ -313,14 +340,22 @@ class MainWindow(Adw.ApplicationWindow):
                   self.read_button):
             w.set_sensitive(True)
 
-        pos, total = db.position_in_queue(self._conn, article["id"])
         label = dates.format_display(article["published_at"],
                                      article["date_precision"],
                                      article["date_confidence"])
         minutes = reading_minutes(article["word_count"])
+
+        if self.hide_read:
+            # With read articles hidden, a position within the whole archive
+            # is not what you want to know -- how much is still ahead is.
+            left = db.queue_counts(self._conn)["unread"]
+            place = f"{left:,} article{'' if left == 1 else 's'} left".replace(",", " ")
+        else:
+            pos, total = db.position_in_queue(self._conn, article["id"])
+            place = f"{pos:,} of {total:,}".replace(",", " ")
+
         self.position_label.set_label(
-            f"{pos:,} of {total:,}".replace(",", " ") +
-            f"   ·   {article['source_name']}   ·   {label}   ·   {minutes} min")
+            f"{place}   ·   {article['source_name']}   ·   {label}   ·   {minutes} min")
 
         state = self._state_of(article["id"])
         self.fav_button.handler_block_by_func(self._on_favourite_toggled)
@@ -335,16 +370,19 @@ class MainWindow(Adw.ApplicationWindow):
         self.read_button.handler_unblock_by_func(self._on_read_toggled)
 
         self.prev_button.set_sensitive(
-            db.neighbour(self._conn, article["id"], -1) is not None)
+            db.neighbour(self._conn, article["id"], -1,
+                         hide_read=self.hide_read) is not None)
         self.next_button.set_sensitive(
-            db.neighbour(self._conn, article["id"], +1) is not None)
+            db.neighbour(self._conn, article["id"], +1,
+                         hide_read=self.hide_read) is not None)
 
     def go_next(self, *_):
         if self.current is None:
             return
         self._flush_scroll()
-        nxt = db.neighbour(self._conn, self.current["id"], +1)
         db.set_read(self._conn, self.current["id"], True)
+        nxt = db.neighbour(self._conn, self.current["id"], +1,
+                           hide_read=self.hide_read)
         if nxt is None:
             self.toasts.add_toast(Adw.Toast(title="That was the last article",
                                             timeout=3))
@@ -356,7 +394,8 @@ class MainWindow(Adw.ApplicationWindow):
         if self.current is None:
             return
         self._flush_scroll()
-        prev = db.neighbour(self._conn, self.current["id"], -1)
+        prev = db.neighbour(self._conn, self.current["id"], -1,
+                            hide_read=self.hide_read)
         if prev is None:
             self.toasts.add_toast(Adw.Toast(title="This is the oldest article",
                                             timeout=3))
@@ -462,6 +501,7 @@ class MainWindow(Adw.ApplicationWindow):
             ("Library", "L / Esc"),
             ("Search", "Ctrl+F or /"),
             ("Update archive", "F5"),
+            ("Hide / show read articles", "H"),
             ("Switch theme", "Ctrl+T"),
             ("Open original", "Ctrl+O"),
         ]

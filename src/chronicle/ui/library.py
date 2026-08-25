@@ -35,6 +35,7 @@ class LibraryView(Gtk.Box):
 
     __gsignals__ = {
         "article-chosen": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
+        "hide-read-changed": (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
 
     def __init__(self, get_conn):
@@ -42,6 +43,7 @@ class LibraryView(Gtk.Box):
         self.get_conn = get_conn
         self.scope = "all"
         self.search_text = ""
+        self.hide_read = db.state_get(get_conn(), "hide_read", "0") == "1"
         self._offset = 0
         self._exhausted = False
 
@@ -76,6 +78,13 @@ class LibraryView(Gtk.Box):
             btn.connect("toggled", self._on_scope, scope)
             self._buttons[scope] = btn
             switcher.append(btn)
+
+        self.hide_read_button = Gtk.ToggleButton(
+            icon_name="view-conceal-symbolic", active=self.hide_read,
+            tooltip_text="Hide articles you have already read",
+            css_classes=["chronicle-filter"], margin_start=10)
+        self.hide_read_button.connect("toggled", self._on_hide_read)
+        switcher.append(self.hide_read_button)
         header_inner.append(switcher)
 
         self.summary = Gtk.Label(xalign=0.5, css_classes=["dim-label", "caption"])
@@ -200,8 +209,9 @@ class LibraryView(Gtk.Box):
         if self._exhausted:
             return
         conn = self.get_conn()
-        rows = db.queue(conn, scope=self.scope, limit=PAGE_SIZE, offset=self._offset,
-                        search=self.search_text or None)
+        rows = db.queue(conn, scope=self.scope, limit=PAGE_SIZE,
+                        offset=self._offset, search=self.search_text or None,
+                        hide_read=self.hide_read)
         if len(rows) < PAGE_SIZE:
             self._exhausted = True
         self._offset += len(rows)
@@ -234,6 +244,8 @@ class LibraryView(Gtk.Box):
                 f"{counts['favourites']:,} favourites").replace(",", " ")
         if counts["undated"]:
             text += f"  ·  {counts['undated']} undated"
+        if self.hide_read and self.scope != "read":
+            text += "  ·  read articles hidden"
         self.summary.set_label(text)
 
     # -- events ------------------------------------------------------------
@@ -245,7 +257,15 @@ class LibraryView(Gtk.Box):
     def _on_scope(self, button, scope) -> None:
         if button.get_active():
             self.scope = scope
+            # "Read" and "hide read" contradict each other.
+            self.hide_read_button.set_sensitive(scope != "read")
             self.reload()
+
+    def _on_hide_read(self, button) -> None:
+        self.hide_read = button.get_active()
+        db.state_set(self.get_conn(), "hide_read", "1" if self.hide_read else "0")
+        self.reload()
+        self.emit("hide-read-changed")
 
     def _on_activate(self, _view, position) -> None:
         obj = self.store.get_item(position)

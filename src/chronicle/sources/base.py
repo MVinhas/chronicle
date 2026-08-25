@@ -58,6 +58,29 @@ class Cancelled(Exception):
     pass
 
 
+def probe_all(ctx: "Context", items, fn, *, workers: int = 5,
+              label: str = "", total: int | None = None):
+    """Run `fn` over `items` in parallel, yielding results in the input order.
+
+    Discovery for a static site means fetching every page to read its metadata.
+    Done one at a time that is minutes of waiting before a single article is
+    stored, so it is worth overlapping -- while still yielding in order, since
+    several adapters depend on the site's own ordering.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    items = list(items)
+    total = total or len(items)
+    done = 0
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        for result in pool.map(fn, items):
+            ctx.check()
+            done += 1
+            if label and (done % 10 == 0 or done == total):
+                ctx.say(f"{label} {done}/{total}", done / max(1, total))
+            yield result
+
+
 def assess(html: str) -> str:
     """Is this a usable article body?
 
@@ -84,6 +107,8 @@ class Source:
     # are someone else's servers, and the point is a complete archive rather
     # than a fast one.
     fetch_concurrency: int = 4
+    # Same, for the metadata pass that discovery does over a static site.
+    discover_concurrency: int = 5
     # Images matching these substrings are decoration, not content.
     image_blocklist: tuple[str, ...] = (
         "trans_1x1.gif", "spacer.gif", "pixel.gif", "1x1.png",

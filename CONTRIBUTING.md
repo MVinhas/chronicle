@@ -63,6 +63,58 @@ This is the part that matters most, because dates decide reading order.
 `db.upsert_article()` only ever overwrites a date with one of strictly higher
 confidence, so a later, better signal wins and a worse one cannot regress it.
 
+## Command line
+
+The archive is scriptable, which is what makes scheduled updates and export
+formats possible. The CLI ships **inside** the Flatpak on purpose: a Flatpak
+app's data lives in `~/.var/app/io.github.mvinhas.Chronicle/data`, hidden from
+every other sandbox, so a CLI run from outside would quietly build a different,
+invisible library.
+
+```sh
+cli() { flatpak run --command=chronicle-cli io.github.mvinhas.Chronicle "$@"; }
+
+cli add https://example.com  # detect and follow a new blog
+cli sources                  # what you follow
+cli rename example "Example" # change a blog's display name
+cli sync                     # build or update everything
+cli sync --source example    # just one
+cli stats                    # coverage and date confidence
+cli queue --scope unread     # the reading queue
+cli export --content         # JSON dump of the library
+```
+
+Only one Chronicle process may hold the library at a time, so close the app
+before running a sync; it will say so rather than starting a second writer.
+
+To keep a second, separate library, set `CHRONICLE_LIBRARY`:
+
+```sh
+flatpak run --env=CHRONICLE_LIBRARY=~/scratch-library io.github.mvinhas.Chronicle
+```
+
+## How it fits together
+
+```
+src/chronicle/
+  db.py          SQLite schema, the chronological queue, reading state
+  dates.py       date parsing with precision + confidence + provenance
+  net.py         polite HTTP: rate limiting, retries, conditional caching
+  htmlutil.py    content extraction (readability-style) and sanitisation
+  images.py      content-addressed image cache
+  sync.py        archive building, progress, cancellation
+  sources/       one module per ingestion strategy
+  ui/            GTK4 + libadwaita; the reader is a WebKitGTK surface
+```
+
+Python 3 + GTK 4 + libadwaita + WebKitGTK 6, packaged as a Flatpak against the
+GNOME 50 runtime. SQLite for storage. The only bundled third-party code is
+BeautifulSoup and soupsieve, both pure Python.
+
+Articles are stored as sanitised HTML rather than scraped text, which is what
+keeps images, structure and captions intact — and is the seam an EPUB export
+would build on.
+
 ## Development
 
 The app is Python 3 + GTK 4 + libadwaita + WebKitGTK 6, run against the GNOME

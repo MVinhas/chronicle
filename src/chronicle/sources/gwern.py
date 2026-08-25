@@ -14,7 +14,7 @@ import re
 from urllib.parse import urlparse
 
 from .. import dates, htmlutil, net
-from .base import Content, Context, Source, Stub
+from .base import Content, Context, Source, Stub, probe_all
 
 SITEMAP = "https://gwern.net/sitemap.xml"
 INDEX = "https://gwern.net/index"
@@ -35,6 +35,7 @@ class GwernSource(Source):
     plugin_id = "gwern"
     display_name = "Gwern"
     content_selectors = ["#markdownBody", "#markdown-body", "article", "main"]
+    discover_concurrency = 5
     image_blocklist = Source.image_blocklist + ("/static/img/icon/", "logo.svg")
 
     def discover(self, ctx: Context):
@@ -42,12 +43,11 @@ class GwernSource(Source):
         urls = self._candidate_urls(ctx)
         ctx.say(f"Found {len(urls)} candidate pages on gwern.net")
 
-        for i, url in enumerate(sorted(urls)):
-            ctx.check()
-            if i % 15 == 0:
-                ctx.say(f"gwern.net: reading metadata {i}/{len(urls)}",
-                        i / max(1, len(urls)))
-            stub = self._probe(url, i)
+        ordered = sorted(urls)
+        for stub in probe_all(ctx, list(enumerate(ordered)),
+                              lambda item: self._probe(item[1], item[0]),
+                              workers=self.discover_concurrency,
+                              label="gwern.net: reading metadata"):
             if stub is not None:
                 yield stub
 

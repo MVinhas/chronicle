@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 
 from .. import dates, htmlutil, net
-from .base import Content, Context, Source, Stub, assess
+from .base import Content, Context, Source, Stub, assess, probe_all
 
 INDEX = "https://paulgraham.com/articles.html"
 BASE = "https://paulgraham.com/"
@@ -42,6 +42,7 @@ _DATELINE_LIMIT = 14   # lines of body text in which a dateline may appear
 class PaulGrahamSource(Source):
     plugin_id = "paulgraham"
     display_name = "Paul Graham"
+    discover_concurrency = 6
     # Site-wide promotional insert, not part of any essay.
     _PROMO_RE = re.compile(
         r"want to start a startup\?|get funded by\s*y\s*combinator", re.I)
@@ -68,23 +69,26 @@ class PaulGrahamSource(Source):
             slugs.append(s)
         ctx.say(f"Found {len(slugs)} essays on paulgraham.com")
 
-        # Pass 1: fetch each essay, read its dateline.
-        found: list[Stub] = []
-        for i, slug in enumerate(slugs):
-            ctx.check()
-            if i % 10 == 0:
-                ctx.say(f"paulgraham.com: reading {i}/{len(slugs)}", i / max(1, len(slugs)))
+        # Every essay has to be fetched to read its dateline, and the index
+        # order matters for bracketing the undated ones, so collect in order
+        # and only then yield.
+        def read(item):
+            i, slug = item
             url = BASE + slug
             try:
                 resp = net.fetch(url)
             except net.FetchError:
-                continue
+                return None
             raw = resp.text()
             title, date = self._title_and_date(raw, slug)
-            found.append(Stub(
-                guid=net.canonical_url(url), url=url, title=title, date=date,
-                author="Paul Graham", source_order=i,
-                raw_html=raw, base_url=resp.url, content_source="direct"))
+            return Stub(guid=net.canonical_url(url), url=url, title=title,
+                        date=date, author="Paul Graham", source_order=i,
+                        raw_html=raw, base_url=resp.url, content_source="direct")
+
+        found = [s for s in probe_all(ctx, list(enumerate(slugs)), read,
+                                      workers=self.discover_concurrency,
+                                      label="paulgraham.com: reading")
+                 if s is not None]
 
         self._bracket_undated(found)
         yield from found
