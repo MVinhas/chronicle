@@ -24,8 +24,12 @@ from .. import dates, htmlutil, net
 from .base import Content, Context, Source, Stub, assess
 
 FEEDBURNER = "https://feeds.feedburner.com/mrmoneymustache"
-CDX = ("http://web.archive.org/cdx/search/cdx?url={host}%2F{year}%2F*"
-       "&fl=original&collapse=urlkey&filter=statuscode:200")
+# One query for the whole domain beats sixteen per-year ones: ~2.5 minutes
+# against ~8, and it returns a usable snapshot id per URL, which removes a
+# second round trip per article when the body is fetched.
+CDX = ("http://web.archive.org/cdx/search/cdx?url={host}&matchType=domain"
+       "&fl=original,timestamp&collapse=urlkey"
+       "&filter=statuscode:200&filter=mimetype:text/html{window}")
 WAYBACK = "https://web.archive.org/web/{ts}id_/{url}"
 
 _PERMALINK_RE = re.compile(r"^/(\d{4})/(\d{2})/(\d{2})/([^/]+)/?$")
@@ -45,6 +49,13 @@ class MrMoneyMustacheSource(Source):
         "feedburner", "feeds.wordpress.com", "/wp-content/plugins/",
         "web.archive.org/static/",
     )
+    # The Internet Archive answers a page in 10-15 seconds. Fetched one at a
+    # time that is hours for a large blog, so overlap more than usual.
+    fetch_concurrency = 6
+
+    def __init__(self, row, config=None):
+        super().__init__(row, config)
+        self._origin_blocked = False
 
     @property
     def host(self) -> str:
@@ -53,38 +64,40 @@ class MrMoneyMustacheSource(Source):
 
     # -- discovery ---------------------------------------------------------
 
-    def discover(self, ctx: Context):
+    def discover(self, ctx: Context, since_year: int | None = None):
         seen: dict[str, Stub] = {}
 
-        # 1. Recent posts, with full bodies, straight from the feed.
-        ctx.say("Mr. Money Mustache: reading FeedBurner…")
-        for stub in self._from_feed(ctx):
+        # 1. Recent posts, with full bodies, straight from the feed. Yield these
+        #    first so an interrupted run still leaves something readable.
+        ctx.say(f"{self.name}: reading the feed…")
+        feed = self._from_feed(ctx)
+        for stub in feed:
             seen[stub.guid] = stub
-        ctx.say(f"Mr. Money Mustache: {len(seen)} recent posts from the feed")
-
-        # 2. The historical archive, from the Internet Archive.
-        this_year = datetime.now().year
-        years = list(range(_FIRST_YEAR, this_year + 1))
-        for i, year in enumerate(years):
-            ctx.check()
-            ctx.say(f"Mr. Money Mustache: searching archive for {year}…",
-                    i / len(years))
-            for url, d in self._cdx_year(year):
-                guid = net.canonical_url(url)
-                if guid in seen:
-                    continue
-                slug = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1]
-                seen[guid] = Stub(
-                    guid=guid, url=url,
-                    title=slug.replace("-", " ").strip().capitalize(),
-                    date=d, author="Mr. Money Mustache",
-                    content_source="", source_order=0)
-        ctx.say(f"Mr. Money Mustache: {len(seen)} posts discovered")
-
-        ordered = sorted(seen.values(), key=lambda s: (s.date.iso or "9999", s.url))
-        for i, stub in enumerate(ordered):
-            stub.source_order = i
+        ctx.say(f"{self.name}: {len(feed)} recent posts from the feed")
+        for stub in sorted(feed, key=lambda s: s.date.iso or ""):
             yield stub
+
+        # 2. The historical archive, from the Internet Archive. The origin
+        #    answers 403 to every client, so this is the only route to it.
+        ctx.check()
+        ctx.say(f"{self.name}: searching the Internet Archive — this takes "
+                f"a couple of minutes…")
+        found = list(self._cdx(ctx, since_year))
+        ctx.say(f"{self.name}: {len(found)} posts found in the archive")
+
+        order = 0
+        for url, date, timestamp in sorted(found, key=lambda r: r[1].iso or ""):
+            ctx.check()
+            guid = net.canonical_url(url)
+            order += 1
+            if guid in seen:
+                continue
+            slug = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1]
+            yield Stub(
+                guid=guid, url=url,
+                title=slug.replace("-", " ").strip().capitalize(),
+                date=date, author=self.name, source_order=order,
+                extra={"snapshot": timestamp})
 
     def _from_feed(self, ctx: Context) -> list[Stub]:
         out: list[Stub] = []
@@ -109,17 +122,23 @@ class MrMoneyMustacheSource(Source):
                 raw_html=body or None, base_url=link, content_source="feed"))
         return out
 
-    def _cdx_year(self, year: int):
-        url = CDX.format(host=self.host.replace("www.", ""), year=year)
+    def _cdx(self, ctx: Context, since_year: int | None = None):
+        """Every archived permalink, with the snapshot id to fetch it from."""
+        window = f"&from={since_year}" if since_year else ""
+        url = CDX.format(host=self.host.replace("www.", ""), window=window)
         try:
-            text = net.fetch_text(url, timeout=150, retries=2, max_bytes=60_000_000)
-        except net.FetchError:
+            text = net.fetch_text(url, timeout=300, retries=2,
+                                  max_bytes=80_000_000)
+        except net.FetchError as exc:
+            ctx.say(f"{self.name}: the Internet Archive did not answer ({exc.status})")
             return
-        seen_slugs = set()
+
+        best: dict[str, tuple[str, object, str]] = {}
         for line in text.splitlines():
-            raw = line.strip()
-            if not raw:
+            parts = line.split()
+            if len(parts) < 2:
                 continue
+            raw, timestamp = parts[0], parts[1]
             try:
                 path = urlparse(raw).path
             except ValueError:
@@ -130,18 +149,21 @@ class MrMoneyMustacheSource(Source):
             if not m:
                 continue
             y, mo, d, slug = m.groups()
-            if slug in seen_slugs:
-                continue
-            seen_slugs.add(slug)
             date = dates._mk(int(y), int(mo), int(d), precision=dates.PRECISION_DAY,
                              confidence="high", source="url:permalink")
             if not date.known:
                 continue
-            yield f"https://{self.host}/{y}/{mo}/{d}/{slug}/", date
+            # Prefer the latest snapshot: earlier ones are often partial crawls.
+            if slug not in best or timestamp > best[slug][2]:
+                best[slug] = (f"https://{self.host}/{y}/{mo}/{d}/{slug}/",
+                              date, timestamp)
+        yield from best.values()
 
     # -- content -----------------------------------------------------------
 
-    def fetch_content(self, ctx: Context, url: str, stub_html=None, base_url=None) -> Content:
+    def fetch_content(self, ctx: Context, url: str, stub_html=None, base_url=None,
+                      extra: dict | None = None) -> Content:
+        extra = extra or {}
         if stub_html:
             html = htmlutil.sanitise(htmlutil.parse(f"<div>{stub_html}</div>").div,
                                      base_url or url)
@@ -150,13 +172,19 @@ class MrMoneyMustacheSource(Source):
             if assess(html) == "ok":
                 return Content(html, status="ok", source="feed")
 
-        try:                                   # direct — may pass from a real IP
-            resp = net.fetch(url, retries=1)
-            result = self.clean(resp.text(), resp.url, source="direct")
-            if result.status == "ok":
-                return result
-        except net.FetchError:
-            pass
+        # The origin is behind a bot challenge. Try it once per run; once it
+        # has refused, stop paying the timeout on every remaining article.
+        if not self._origin_blocked:
+            try:
+                resp = net.fetch(url, retries=1)
+                result = self.clean(resp.text(), resp.url, source="direct")
+                if result.status == "ok":
+                    return result
+            except net.FetchError as exc:
+                if exc.status in (403, 401, 429):
+                    self._origin_blocked = True
+                    ctx.say(f"{self.name}: the site is blocking direct access; "
+                            f"using the Internet Archive")
 
         if ctx.browser_fetch is not None:      # the app's own WebKit view
             try:
@@ -168,10 +196,12 @@ class MrMoneyMustacheSource(Source):
             except Exception:
                 pass
 
-        return self._from_wayback(url)
+        return self._from_wayback(url, extra.get("snapshot"))
 
-    def _from_wayback(self, url: str) -> Content:
-        ts = self._best_snapshot(url)
+    def _from_wayback(self, url: str, snapshot: str | None = None) -> Content:
+        # Discovery already recorded a snapshot id, so the availability lookup
+        # is only needed for articles carried over from an interrupted run.
+        ts = snapshot or self._best_snapshot(url)
         if not ts:
             return Content("", status="error", source="wayback:none")
         try:

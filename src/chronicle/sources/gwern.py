@@ -132,7 +132,8 @@ class GwernSource(Source):
             raw_html=html, base_url=resp.url, content_source="direct",
         )
 
-    def fetch_content(self, ctx: Context, url: str, stub_html=None, base_url=None) -> Content:
+    def fetch_content(self, ctx: Context, url: str, stub_html=None, base_url=None,
+                      extra: dict | None = None) -> Content:
         if stub_html:
             return self.clean(stub_html, base_url or url, source="direct")
         resp = net.fetch(url)

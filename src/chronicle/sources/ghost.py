@@ -113,7 +113,8 @@ class GhostSource(Source):
                        title=url.rstrip("/").rsplit("/", 1)[-1].replace("-", " ").title(),
                        date=dates.UNKNOWN, source_order=order)
 
-    def fetch_content(self, ctx: Context, url: str, stub_html=None, base_url=None) -> Content:
+    def fetch_content(self, ctx: Context, url: str, stub_html=None, base_url=None,
+                      extra: dict | None = None) -> Content:
         if stub_html:
             html = htmlutil.sanitise(htmlutil.parse(f"<div>{stub_html}</div>").div,
                                      base_url or url)

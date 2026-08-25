@@ -11,6 +11,7 @@ import json
 import logging
 import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 from . import db, htmlutil, images, net, sources
@@ -128,7 +129,7 @@ class Syncer:
                         (article_id,)).fetchone()
                     if need and need["content_status"] in ("pending", "error"):
                         pending.append((article_id, stub.url, stub.raw_html,
-                                        stub.base_url))
+                                        stub.base_url, stub.extra))
                 if discovered % 25 == 0:
                     self._emit(prog)
         except Cancelled:
@@ -162,51 +163,79 @@ class Syncer:
                       cache_images: bool) -> None:
         if not pending:
             # Pick up anything left unfetched by an earlier interrupted run.
-            pending = [(r["id"], r["url"], None, None)
+            pending = [(r["id"], r["url"], None, None, {})
                        for r in db.pending_content(conn, row["id"])]
         total = len(pending)
         if not total:
             return
+        workers = max(1, int(source.fetch_concurrency))
         self._say(prog, f"{row['name']}: retrieving {total} articles…")
 
-        for i, (article_id, url, raw_html, base_url) in enumerate(pending):
+        def fetch(item):
+            article_id, url, raw_html, base_url, extra = item
             if self.should_stop():
-                return
-            if i % 5 == 0:
-                self._say(prog, f"{row['name']}: article {i + 1} of {total}",
-                          i / max(1, total))
+                return article_id, url, None
             try:
-                content = source.fetch_content(ctx, url, raw_html, base_url)
+                return article_id, url, source.fetch_content(
+                    ctx, url, raw_html, base_url, extra=extra)
             except Cancelled:
-                return
+                return article_id, url, None
             except Exception as exc:                  # noqa: BLE001
-                db.mark_content_error(conn, article_id, str(exc))
-                prog.failed += 1
-                continue
+                return article_id, url, exc
 
-            html = content.html or ""
-            status = content.status
-            if status == "ok" and cache_images and not self.should_stop():
-                try:
-                    html, _ = images.cache_images_for(
-                        conn, article_id, html, should_stop=self.should_stop)
-                except Exception as exc:              # noqa: BLE001
-                    log.debug("image caching failed for %s: %s", url, exc)
+        done = 0
+        # Fetching is network-bound and some archives answer slowly, so it runs
+        # in parallel. Everything that touches the database stays on this
+        # thread: the connection is not shared across threads.
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(fetch, item): item for item in pending}
+            try:
+                for future in as_completed(futures):
+                    article_id, url, result = future.result()
+                    done += 1
+                    if done % 5 == 0 or done == total:
+                        self._say(prog, f"{row['name']}: article {done} of {total}",
+                                  done / max(1, total))
+                    if result is None:
+                        continue
+                    if isinstance(result, Exception):
+                        db.mark_content_error(conn, article_id, str(result))
+                        prog.failed += 1
+                        continue
+                    self._store(conn, source, article_id, url, result, prog,
+                                cache_images)
+                    if self.should_stop():
+                        break
+            finally:
+                if self.should_stop():
+                    for future in futures:
+                        future.cancel()
 
-            row_now = conn.execute("SELECT title FROM articles WHERE id=?",
-                                   (article_id,)).fetchone()
-            if status in ("ok", "partial", "paywalled"):
-                db.update_content(
-                    conn, article_id, html, status=status, source=content.source,
-                    word_count=htmlutil.word_count(html),
-                    image_count=htmlutil.count_images(html),
-                    excerpt=htmlutil.make_excerpt(html),
-                    content_hash=htmlutil.content_hash(html))
-                prog.fetched += 1
-                self._maybe_title(conn, article_id, row_now, url)
-            else:
-                db.mark_content_error(conn, article_id, f"{status}:{content.source}")
-                prog.failed += 1
+    def _store(self, conn, source, article_id: int, url: str, content,
+               prog: Progress, cache_images: bool) -> None:
+        html = content.html or ""
+        status = content.status
+        if status == "ok" and cache_images and not self.should_stop():
+            try:
+                html, _ = images.cache_images_for(
+                    conn, article_id, html, should_stop=self.should_stop)
+            except Exception as exc:                  # noqa: BLE001
+                log.debug("image caching failed for %s: %s", url, exc)
+
+        row_now = conn.execute("SELECT title FROM articles WHERE id=?",
+                               (article_id,)).fetchone()
+        if status in ("ok", "partial", "paywalled"):
+            db.update_content(
+                conn, article_id, html, status=status, source=content.source,
+                word_count=htmlutil.word_count(html),
+                image_count=htmlutil.count_images(html),
+                excerpt=htmlutil.make_excerpt(html),
+                content_hash=htmlutil.content_hash(html))
+            prog.fetched += 1
+            self._maybe_title(conn, article_id, row_now, url)
+        else:
+            db.mark_content_error(conn, article_id, f"{status}:{content.source}")
+            prog.failed += 1
 
     @staticmethod
     def _maybe_title(conn, article_id: int, row_now, url: str) -> None:

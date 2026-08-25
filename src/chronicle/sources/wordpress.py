@@ -76,7 +76,8 @@ class WordPressSource(Source):
             raw_html=body or None, base_url=link, content_source="api",
         )
 
-    def fetch_content(self, ctx: Context, url: str, stub_html=None, base_url=None) -> Content:
+    def fetch_content(self, ctx: Context, url: str, stub_html=None, base_url=None,
+                      extra: dict | None = None) -> Content:
         if stub_html:
             # API bodies are already just the post content; sanitise, don't extract.
             html = htmlutil.sanitise(htmlutil.parse(f"<div>{stub_html}</div>").div,

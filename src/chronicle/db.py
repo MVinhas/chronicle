@@ -260,6 +260,12 @@ def set_source_enabled(conn, source_id: int, enabled: bool) -> None:
                  (1 if enabled else 0, source_id))
 
 
+def rename_source(conn, source_id: int, name: str) -> None:
+    name = (name or "").strip()
+    if name:
+        conn.execute("UPDATE sources SET name=? WHERE id=?", (name, source_id))
+
+
 def mark_sync(conn, source_id: int, status: str, message: str = "") -> None:
     conn.execute(
         "UPDATE sources SET last_sync_at=?, last_sync_status=?, last_sync_message=? WHERE id=?",
@@ -307,13 +313,20 @@ def upsert_article(conn, source_id: int, guid: str, **fields) -> tuple[int, bool
             sets.append(f"{f}=?")
             vals.append(fields[f])
 
-    new_conf = fields.get("date_confidence")
-    if new_conf and fields.get("published_at"):
-        if _date_rank(new_conf) > _date_rank(row["date_confidence"]):
-            for f in ("published_at", "date_precision", "date_confidence", "date_source"):
-                if fields.get(f) is not None:
-                    sets.append(f"{f}=?")
-                    vals.append(fields[f])
+    # An article has exactly one source, so that source's latest reading is
+    # authoritative -- including when it is now *less* certain than before,
+    # which is what happens after an adapter is corrected. A date that used to
+    # be read confidently out of a page's prose should be able to become an
+    # honest estimate.
+    #
+    # The one thing that must never happen is an unknown date wiping a known
+    # one: that would let a single failed fetch erase good data.
+    if fields.get("published_at"):
+        for f in ("published_at", "date_precision", "date_confidence",
+                  "date_source"):
+            if fields.get(f) is not None:
+                sets.append(f"{f}=?")
+                vals.append(fields[f])
     if sets:
         vals.append(row["id"])
         conn.execute(f"UPDATE articles SET {','.join(sets)} WHERE id=?", vals)

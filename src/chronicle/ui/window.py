@@ -44,6 +44,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         self._load_css()
         self._build_ui()
+        self._follow_color_scheme()
         self._install_actions()
         self.refresh_library()
         self.resume()
@@ -78,11 +79,19 @@ class MainWindow(Adw.ApplicationWindow):
                                     policy=Adw.ViewSwitcherPolicy.WIDE)
         self.header = Adw.HeaderBar(title_widget=switcher)
 
+        theme_menu = Gio.Menu()
+        theme_menu.append("Follow system", "win.theme::system")
+        theme_menu.append("Light", "win.theme::light")
+        theme_menu.append("Dark", "win.theme::dark")
+
         menu = Gio.Menu()
         menu.append("Update archive", "win.sync")
         menu.append("Open original in browser", "win.open-external")
-        menu.append("Keyboard shortcuts", "win.shortcuts")
-        menu.append("About Chronicle", "win.about")
+        menu.append_section("Appearance", theme_menu)
+        extras = Gio.Menu()
+        extras.append("Keyboard shortcuts", "win.shortcuts")
+        extras.append("About Chronicle", "win.about")
+        menu.append_section(None, extras)
         self.header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic",
                                             menu_model=menu, tooltip_text="Menu"))
 
@@ -98,6 +107,16 @@ class MainWindow(Adw.ApplicationWindow):
         self.set_content(self.toasts)
 
         self.stack.connect("notify::visible-child-name", self._on_page_changed)
+
+    def _follow_color_scheme(self) -> None:
+        """Track the desktop light/dark preference and repaint the reader."""
+        manager = Adw.StyleManager.get_default()
+
+        def apply(*_args):
+            self.reader.set_dark(manager.get_dark())
+
+        manager.connect("notify::dark", apply)
+        apply()
 
     def _build_reader_page(self) -> Gtk.Widget:
         self.reader = ReaderView()
@@ -173,16 +192,56 @@ class MainWindow(Adw.ApplicationWindow):
             ("scroll-down", lambda *_: self.reader.scroll_by_page(1), ["space"]),
             ("scroll-up", lambda *_: self.reader.scroll_by_page(-1), ["<Shift>space"]),
             ("top", lambda *_: self.reader.scroll_home(), ["Home"]),
+            ("cycle-theme", self.cycle_theme, ["<Control>t"]),
             ("shortcuts", self.show_shortcuts, ["<Control>question"]),
             ("about", self.show_about, []),
         ]
         app = self.get_application()
+        self._install_theme_action()
         for name, handler, accels in specs:
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", handler)
             self.add_action(action)
             if accels:
                 app.set_accels_for_action(f"win.{name}", accels)
+
+    # Follow system / light / dark, remembered between sessions.
+    THEMES = ("system", "light", "dark")
+    _SCHEMES = {
+        "system": Adw.ColorScheme.DEFAULT,
+        "light": Adw.ColorScheme.FORCE_LIGHT,
+        "dark": Adw.ColorScheme.FORCE_DARK,
+    }
+
+    def _install_theme_action(self) -> None:
+        current = db.state_get(self._conn, "theme", "system")
+        if current not in self.THEMES:
+            current = "system"
+        action = Gio.SimpleAction.new_stateful(
+            "theme", GLib.VariantType.new("s"), GLib.Variant("s", current))
+        action.connect("activate", self._on_theme)
+        self.add_action(action)
+        self._theme_action = action
+        self._apply_theme(current)
+
+    def _on_theme(self, action, param) -> None:
+        name = param.get_string()
+        action.set_state(param)
+        db.state_set(self._conn, "theme", name)
+        self._apply_theme(name)
+
+    def _apply_theme(self, name: str) -> None:
+        Adw.StyleManager.get_default().set_color_scheme(
+            self._SCHEMES.get(name, Adw.ColorScheme.DEFAULT))
+
+    def cycle_theme(self, *_):
+        """Ctrl+T steps through system -> light -> dark."""
+        current = self._theme_action.get_state().get_string()
+        nxt = self.THEMES[(self.THEMES.index(current) + 1) % len(self.THEMES)]
+        self._theme_action.activate(GLib.Variant("s", nxt))
+        self.toasts.add_toast(Adw.Toast(
+            title={"system": "Following the system theme",
+                   "light": "Light theme", "dark": "Dark theme"}[nxt], timeout=2))
 
     def show_page(self, name: str) -> None:
         self.stack.set_visible_child_name(name)
@@ -403,6 +462,7 @@ class MainWindow(Adw.ApplicationWindow):
             ("Library", "L / Esc"),
             ("Search", "Ctrl+F or /"),
             ("Update archive", "F5"),
+            ("Switch theme", "Ctrl+T"),
             ("Open original", "Ctrl+O"),
         ]
         body = "\n".join(f"{k}   —   {v}" for k, v in pairs)

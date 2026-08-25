@@ -1,9 +1,14 @@
 """The reading surface: stylesheet and document template.
 
-The reader is a deliberate light "paper" surface. Long-form reading is the
-whole point of the app, so the measure, leading and scale here are the design,
-not decoration: ~66 characters per line, 1.62 leading, and a single serif
-optimised for continuous text.
+Long-form reading is the whole point of the app, so the measure, leading and
+scale here are the design, not decoration: ~66 characters per line, 1.62
+leading, and a single serif optimised for continuous text.
+
+Two palettes: a warm paper light theme and a low-contrast dark one. Neither
+uses pure black or pure white -- both are fatiguing over a long read. The
+active palette is chosen by the app from libadwaita's colour scheme rather
+than by a CSS media query, because the WebView does not reliably inherit the
+desktop preference.
 """
 from __future__ import annotations
 
@@ -59,10 +64,30 @@ READER_CSS = FONT_FACES + """
   --accent:     #7a4b2a;
   --quote-bar:  #d8d0c4;
   --code-bg:    #f4f1ec;
+  --link-rule:  rgba(122, 75, 42, 0.40);
+  --notice-bg:  #f7f3ec;
+  --select:     #e8dcc8;
+  --img-fade:   none;
   --measure:    34rem;
   --serif: 'Source Serif 4', 'Noto Serif', 'Liberation Serif', Georgia, serif;
   --sans:  'Adwaita Sans', Cantarell, 'Noto Sans', system-ui, sans-serif;
   --mono:  'Source Code Pro', 'Adwaita Mono', 'DejaVu Sans Mono', monospace;
+}
+
+html.dark {
+  --ink:        #ddd6ca;
+  --ink-soft:   #a49c90;
+  --ink-faint:  #7d766c;
+  --paper:      #191817;
+  --rule:       #35322d;
+  --accent:     #c9a077;
+  --quote-bar:  #45403a;
+  --code-bg:    #221f1d;
+  --link-rule:  rgba(201, 160, 119, 0.45);
+  --notice-bg:  #232019;
+  --select:     #4a3f2c;
+  /* Take the glare off pure-white diagrams and screenshots. */
+  --img-fade:   brightness(0.88) contrast(1.02);
 }
 
 * { box-sizing: border-box; }
@@ -164,7 +189,7 @@ h5, h6 { font-size: 0.94rem; color: var(--ink-soft); }
 a {
   color: inherit;
   text-decoration: underline;
-  text-decoration-color: rgba(122, 75, 42, 0.4);
+  text-decoration-color: var(--link-rule);
   text-underline-offset: 0.16em;
   text-decoration-thickness: 0.055em;
 }
@@ -236,6 +261,7 @@ img {
   display: block;
   margin: 1.9em auto;
   border-radius: 3px;
+  filter: var(--img-fade);
 }
 
 figure {
@@ -308,21 +334,21 @@ caption {
   line-height: 1.7;
   color: var(--ink-faint);
 }
-.provenance a { text-decoration-color: rgba(138,133,126,0.4); }
+.provenance a { text-decoration-color: var(--link-rule); }
 
 .notice {
   font-family: var(--sans);
   font-size: 0.7rem;
   line-height: 1.6;
   color: var(--ink-soft);
-  background: #f7f3ec;
+  background: var(--notice-bg);
   border: 1px solid var(--rule);
   border-radius: 5px;
   padding: 0.9em 1.1em;
   margin: 0 0 2rem;
 }
 
-::selection { background: #e8dcc8; }
+::selection { background: var(--select); }
 
 @media (max-width: 640px) {
   html { font-size: 18px; }
@@ -332,7 +358,7 @@ caption {
 """
 
 DOCUMENT = """<!DOCTYPE html>
-<html lang="en"><head>
+<html lang="en" class="{theme}"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
@@ -457,9 +483,10 @@ def build_provenance(article) -> str:
     return "<br>".join(bits)
 
 
-def build_document(article) -> str:
+def build_document(article, dark: bool = False) -> str:
     """Assemble the full reader page for one article."""
     return DOCUMENT.format(
+        theme="dark" if dark else "light",
         title=_esc(article["title"]),
         source=_esc(article["source_name"]),
         byline=build_byline(article),
@@ -472,7 +499,7 @@ def build_document(article) -> str:
     )
 
 
-PLACEHOLDER = """<!DOCTYPE html><html><head><meta charset="utf-8"><style>%s
+PLACEHOLDER = """<!DOCTYPE html><html class="%s"><head><meta charset="utf-8"><style>%s
 .empty { max-width: 26rem; margin: 22vh auto; text-align: center;
          font-family: var(--sans); color: var(--ink-soft); }
 .empty h1 { font-family: var(--serif); font-size: 1.5rem; font-weight: 600;
@@ -481,5 +508,10 @@ PLACEHOLDER = """<!DOCTYPE html><html><head><meta charset="utf-8"><style>%s
 </style></head><body><div class="empty"><h1>%s</h1><p>%s</p></div></body></html>"""
 
 
-def placeholder(heading: str, body: str) -> str:
-    return PLACEHOLDER % (READER_CSS, _esc(heading), body)
+def placeholder(heading: str, body: str, dark: bool = False) -> str:
+    return PLACEHOLDER % ("dark" if dark else "light", READER_CSS,
+                          _esc(heading), body)
+
+
+# Painted behind the page so a theme switch never flashes the wrong ground.
+BACKGROUND = {"light": "#fdfcfa", "dark": "#191817"}

@@ -50,6 +50,10 @@ class ReaderView(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self.article_id: int | None = None
         self._pending_scroll = 0.0
+        self._last_scroll = 0.0
+        self._article = None
+        self._placeholder: tuple[str, str] | None = None
+        self.dark = False
 
         self.web_context = WebKit.WebContext()
         security = self.web_context.get_security_manager()
@@ -83,7 +87,7 @@ class ReaderView(Gtk.Box):
         settings.set_enable_back_forward_navigation_gestures(False)
         settings.set_default_font_family("serif")
 
-        self.webview.set_background_color(_rgba("#fdfcfa"))
+        self.webview.set_background_color(_rgba(style.BACKGROUND["light"]))
         self.webview.connect("decide-policy", self._on_policy)
         self.webview.connect("load-changed", self._on_load_changed)
         self.webview.connect("context-menu", lambda *_: True)
@@ -138,13 +142,31 @@ class ReaderView(Gtk.Box):
 
     def show_article(self, article, scroll: float = 0.0) -> None:
         self.article_id = article["id"]
+        self._article = article
+        self._placeholder = None
         self._pending_scroll = scroll or 0.0
-        self.webview.load_html(style.build_document(article), article["url"] or None)
+        self._last_scroll = self._pending_scroll
+        self.webview.load_html(style.build_document(article, self.dark),
+                               article["url"] or None)
 
     def show_placeholder(self, heading: str, body: str) -> None:
         self.article_id = None
+        self._article = None
+        self._placeholder = (heading, body)
         self._pending_scroll = 0.0
-        self.webview.load_html(style.placeholder(heading, body), None)
+        self.webview.load_html(style.placeholder(heading, body, self.dark), None)
+
+    def set_dark(self, dark: bool) -> None:
+        """Repaint for the desktop's colour scheme, keeping the reader's place."""
+        if dark == self.dark:
+            return
+        self.dark = dark
+        self.webview.set_background_color(
+            _rgba(style.BACKGROUND["dark" if dark else "light"]))
+        if self._article is not None:
+            self.show_article(self._article, self._last_scroll)
+        elif self._placeholder is not None:
+            self.show_placeholder(*self._placeholder)
 
     def _on_load_changed(self, _view, event) -> None:
         if event == WebKit.LoadEvent.FINISHED and self._pending_scroll > 0.01:
@@ -179,7 +201,8 @@ class ReaderView(Gtk.Box):
         except (json.JSONDecodeError, TypeError):
             return
         if payload.get("type") == "scroll":
-            self.emit("scrolled", float(payload.get("value") or 0.0))
+            self._last_scroll = float(payload.get("value") or 0.0)
+            self.emit("scrolled", self._last_scroll)
 
     def _on_policy(self, _view, decision, decision_type) -> bool:
         if decision_type != WebKit.PolicyDecisionType.NAVIGATION_ACTION:

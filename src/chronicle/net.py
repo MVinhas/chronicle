@@ -73,22 +73,27 @@ class Response:
 
 
 class _HostLimiter:
-    """Minimum interval between requests to the same host."""
+    """Minimum interval between request *starts* to the same host.
+
+    The sleep happens outside the lock on purpose. Holding it across the sleep
+    would serialise every request to a host, which silently cancels out any
+    parallelism above — and some archives answer slowly enough (10-15s a page)
+    that serial fetching turns a large archive into hours of work.
+    """
 
     def __init__(self, interval: float = 0.6):
         self.interval = interval
-        self._last: dict[str, float] = {}
+        self._next: dict[str, float] = {}
         self._lock = threading.Lock()
 
     def wait(self, host: str) -> None:
         with self._lock:
             now = time.monotonic()
-            last = self._last.get(host, 0.0)
-            delay = self.interval - (now - last)
-            if delay > 0:
-                time.sleep(delay)
-                now = time.monotonic()
-            self._last[host] = now
+            slot = max(now, self._next.get(host, 0.0))
+            self._next[host] = slot + self.interval
+        delay = slot - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
 
 
 _limiter = _HostLimiter()

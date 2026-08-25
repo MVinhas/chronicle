@@ -222,19 +222,50 @@ class TestQueue(unittest.TestCase):
         self.assertEqual(
             self.conn.execute("SELECT COUNT(*) c FROM articles").fetchone()["c"], 1)
 
-    def test_better_date_wins_worse_date_loses(self):
-        aid = self.add("x", "2010-01-01T00:00:00", confidence="inferred")
+    def test_a_known_date_always_replaces_the_stored_one(self):
+        """The source is authoritative for its own articles, in both directions.
+
+        A corrected adapter may become *less* certain -- a date it used to read
+        out of prose becoming an honest estimate -- and that has to be able to
+        land.
+        """
+        aid = self.add("x", "2010-01-01T00:00:00", confidence="medium")
         self.db.upsert_article(
             self.conn, self.sid, "x", published_at="2011-02-03T00:00:00",
             date_precision="day", date_confidence="exact", date_source="better")
-        row = self.db.get_article(self.conn, aid)
-        self.assertEqual(row["published_at"], "2011-02-03T00:00:00")
+        self.assertEqual(
+            self.db.get_article(self.conn, aid)["published_at"],
+            "2011-02-03T00:00:00")
 
         self.db.upsert_article(
-            self.conn, self.sid, "x", published_at="1999-01-01T00:00:00",
-            date_precision="year", date_confidence="inferred", date_source="worse")
+            self.conn, self.sid, "x", published_at="2009-01-01T00:00:00",
+            date_precision="year", date_confidence="inferred",
+            date_source="downgraded")
         row = self.db.get_article(self.conn, aid)
-        self.assertEqual(row["published_at"], "2011-02-03T00:00:00")
+        self.assertEqual(row["published_at"], "2009-01-01T00:00:00")
+        self.assertEqual(row["date_confidence"], "inferred")
+
+    def test_an_unknown_date_never_wipes_a_known_one(self):
+        """A failed fetch must not erase a date we already have."""
+        aid = self.add("x", "2010-01-01T00:00:00", confidence="exact")
+        self.db.upsert_article(self.conn, self.sid, "x", published_at=None,
+                               date_precision="unknown",
+                               date_confidence="unknown", date_source="")
+        self.assertEqual(
+            self.db.get_article(self.conn, aid)["published_at"],
+            "2010-01-01T00:00:00")
+
+    def test_equal_confidence_correction_lands(self):
+        """A re-sync must be able to correct a date the adapter read wrongly."""
+        aid = self.add("x", "1998-06-01T00:00:00", precision="month",
+                       confidence="medium")
+        self.db.upsert_article(
+            self.conn, self.sid, "x", published_at="2012-01-01T00:00:00",
+            date_precision="month", date_confidence="medium",
+            date_source="text:dateline")
+        self.assertEqual(
+            self.db.get_article(self.conn, aid)["published_at"],
+            "2012-01-01T00:00:00")
 
     def test_neighbour_walks_the_queue(self):
         a = self.add("a", "2001-01-01T00:00:00")
@@ -309,6 +340,29 @@ class TestPaulGraham(unittest.TestCase):
         out = self.src._extract(raw, "https://paulgraham.com/x.html")
         self.assertNotIn("Want to start a startup", out.html)
         self.assertIn("actual essay", out.html)
+
+    def test_dateline_must_open_its_line(self):
+        """A title naming a period is not a dateline.
+
+        'Snapshot: Viaweb, June 1998' was written in January 2012.
+        """
+        lines = ["Snapshot: Viaweb, June 1998", "-->", "January 2012",
+                 "A few hours before the Yahoo acquisition in June 1998"]
+        self.assertEqual(self.src._dateline(lines).iso, "2012-01-01T00:00:00")
+
+    def test_dateline_keeps_only_the_original_date(self):
+        for line, expected in (
+                ("August 2006, rev. April 2007, September 2010", "2006-08-01T00:00:00"),
+                ("December 2001 (rev. May 2002)", "2001-12-01T00:00:00"),
+                ("November 2004, corrected June 2006", "2004-11-01T00:00:00")):
+            self.assertEqual(self.src._dateline(["Title", "-->", line]).iso, expected)
+
+    def test_a_date_in_prose_is_not_a_dateline(self):
+        """An essay with no dateline stays undated rather than borrowing one."""
+        lines = ["Lisp for Web-Based Applications", "-->",
+                 "here are some excerpts from a talk I gave in April 2001 at",
+                 "BBN Labs in Cambridge, MA."]
+        self.assertFalse(self.src._dateline(lines).known)
 
     def test_bracketing_refuses_non_monotonic_neighbours(self):
         from chronicle.sources.base import Stub

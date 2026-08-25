@@ -37,7 +37,8 @@
     </p>
     <p>
       The interface is deliberately minimal: no recommendations, no social
-      features, no gamification. Just the next article.
+      features, no gamification. Just the next article. Light and dark palettes
+      follow the desktop preference, or can be set explicitly.
     </p>
   </description>
 

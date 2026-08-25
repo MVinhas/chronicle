@@ -19,6 +19,11 @@ _FEED_HINTS = ("/feed", "/feed/", "/rss", "/rss.xml", "/atom.xml", "/index.xml",
 _SITEMAP_HINTS = ("/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml",
                   "/sitemap-index.xml", "/sitemap-posts.xml")
 
+# Where blogs conventionally list everything they have published.
+_ARCHIVE_PATHS = ("/archive", "/archives", "/posts", "/all", "/blog",
+                  "/writing", "/essays", "/articles", "/notes", "/")
+_MAX_ARCHIVE_PAGES = 40
+
 _SKIP_PATH = re.compile(
     r"/(tag|tags|category|categories|author|authors|page|search|feed|about|"
     r"contact|privacy|terms|archive|archives|index|sitemap|login|subscribe)"
@@ -35,7 +40,88 @@ class GenericSource(Source):
             got = yield from self._try_sitemap(ctx)
             if got:
                 return
+        if strategy in ("auto", "sitemap", "archive"):
+            got = yield from self._try_archive_pages(ctx)
+            if got:
+                return
         yield from self._from_feed(ctx)
+
+    # -- archive pages -----------------------------------------------------
+
+    def _try_archive_pages(self, ctx: Context):
+        """Crawl the blog's own index of everything it has published.
+
+        Plenty of blogs have no sitemap but do keep an archive page. Following
+        its pagination recovers the whole history where a feed would have given
+        only the newest handful of posts -- and it also covers archive pages
+        whose "load more" button is JavaScript, because the numbered pages it
+        would fetch are usually still served as ordinary URLs.
+        """
+        base = (self.homepage or "").rstrip("/")
+        links: dict[str, int] = {}
+
+        for path in _ARCHIVE_PATHS:
+            ctx.check()
+            found = self._links_from(base + path, base, ctx)
+            if len(found) < 5:
+                continue
+            ctx.say(f"{self.name}: reading the archive at {path}")
+            for url in found:
+                links.setdefault(url, len(links))
+
+            # Follow numbered pagination for as long as it yields new posts.
+            for page in range(2, _MAX_ARCHIVE_PAGES + 1):
+                ctx.check()
+                more = self._links_from(f"{base}{path.rstrip('/')}/page/{page}/",
+                                        base, ctx)
+                fresh = [u for u in more if u not in links]
+                if not fresh:
+                    break
+                for url in fresh:
+                    links.setdefault(url, len(links))
+                ctx.say(f"{self.name}: archive page {page} — {len(links)} posts")
+            break
+
+        if len(links) < 5:
+            return False
+
+        ctx.say(f"{self.name}: {len(links)} posts found in the archive index")
+        count = 0
+        ordered = sorted(links, key=links.get)
+        for i, url in enumerate(ordered):
+            ctx.check()
+            if i % 10 == 0:
+                ctx.say(f"{self.name}: reading {i}/{len(ordered)}",
+                        i / max(1, len(ordered)))
+            stub = self._probe(url, i)
+            if stub is not None:
+                count += 1
+                yield stub
+        return count > 0
+
+    def _links_from(self, page_url: str, base: str, ctx: Context) -> list[str]:
+        """Same-site article links on a page, in document order."""
+        try:
+            html = net.fetch_text(page_url, timeout=30, retries=1)
+        except net.FetchError:
+            return []
+        soup = htmlutil.parse(html)
+        host = urlparse(base).netloc.replace("www.", "")
+        out, seen = [], set()
+        for a in soup.find_all("a", href=True):
+            full = net.absolutise(page_url, a["href"]).split("#")[0]
+            p = urlparse(full)
+            if p.netloc.replace("www.", "") != host:
+                continue
+            if _SKIP_PATH.search(p.path or "") or (p.path or "/") == "/":
+                continue
+            if re.search(r"\.(jpg|png|gif|pdf|zip|xml|json|css|js)$", p.path, re.I):
+                continue
+            if full in seen:
+                continue
+            seen.add(full)
+            out.append(full)
+        return out
 
     # -- sitemap -----------------------------------------------------------
 

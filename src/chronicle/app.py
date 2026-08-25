@@ -28,10 +28,6 @@ class ChronicleApp(Adw.Application):
         Adw.Application.do_startup(self)
         paths.ensure_dirs()
 
-        # The reader is a deliberate light "paper" surface, so the surrounding
-        # chrome stays light too rather than clashing with it.
-        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_LIGHT)
-
         self.locked = db.acquire_library_lock()
         if self.locked:
             db.get_conn()   # open and migrate the library before any UI is built

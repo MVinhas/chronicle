@@ -45,6 +45,12 @@ class PaulGrahamSource(Source):
     # Site-wide promotional insert, not part of any essay.
     _PROMO_RE = re.compile(
         r"want to start a startup\?|get funded by\s*y\s*combinator", re.I)
+    # A dateline *opens* its line. Anything may follow -- the site records
+    # revisions in several shapes: "rev. April 2007", "(rev. May 2002)",
+    # "corrected June 2006", or a bare list of later dates.
+    _DATELINE_START = re.compile(
+        r"^(January|February|March|April|May|June|July|August|September|"
+        r"October|November|December)\s+(\d{4})\b", re.I)
     # Every image on the site is a title GIF, a spacer or navigation chrome.
     image_blocklist = Source.image_blocklist + (
         "turbifycdn.com", "yimg.com", "ycombinator.com/arc/",
@@ -102,14 +108,34 @@ class PaulGrahamSource(Source):
         if title.lower() in ("essays", "", "untitled") and lines:
             title = lines[0].replace("-->", "").strip()
 
-        head = "\n".join(lines[:_DATELINE_LIMIT])
-        dm = _MONTH_RE.search(head)
-        if dm:
-            date = dates.parse_freeform(
-                dm.group(0), confidence="medium", source="text:dateline")
-        else:
-            date = dates.UNKNOWN
-        return title.replace("-->", "").strip() or slug, date
+        return title.replace("-->", "").strip() or slug, self._dateline(lines)
+
+    @classmethod
+    def _dateline(cls, lines: list[str]) -> dates.PubDate:
+        """Find the essay's dateline.
+
+        The dateline opens its own line. Requiring that, rather than matching a
+        date anywhere in the opening lines, is what separates it from two other
+        things that look alike:
+
+        * a title naming the period it describes -- "Snapshot: Viaweb, June
+          1998" was written in January 2012, and the loose rule dated it
+          fourteen years early;
+        * a date mentioned in prose -- "a talk I gave in April 2001" is not a
+          publication date, and an essay with no dateline should stay undated
+          rather than borrow one from its first paragraph.
+
+        Only the leading date is taken; any revision dates that follow are
+        deliberately ignored, since the original publication date is what
+        orders the reading queue.
+        """
+        for line in lines[:_DATELINE_LIMIT]:
+            m = cls._DATELINE_START.match(line.strip())
+            if m:
+                return dates.parse_freeform(
+                    f"{m.group(1)} {m.group(2)}",
+                    confidence="medium", source="text:dateline")
+        return dates.UNKNOWN
 
     # Beyond this, neighbouring essays say nothing useful about a date.
     _MAX_BRACKET_YEARS = 4
@@ -145,7 +171,8 @@ class PaulGrahamSource(Source):
 
     # -- content -----------------------------------------------------------
 
-    def fetch_content(self, ctx: Context, url: str, stub_html=None, base_url=None) -> Content:
+    def fetch_content(self, ctx: Context, url: str, stub_html=None, base_url=None,
+                      extra: dict | None = None) -> Content:
         raw = stub_html
         if raw is None:
             resp = net.fetch(url)
@@ -202,13 +229,6 @@ class PaulGrahamSource(Source):
             if target.parent is not None:
                 target.decompose()
 
-    # A standalone dateline, optionally noting a later revision.
-    _DATELINE_ONLY = re.compile(
-        r"^(?:January|February|March|April|May|June|July|August|September|"
-        r"October|November|December)\s+\d{4}"
-        r"(?:\s*,?\s*rev\.?\s*(?:January|February|March|April|May|June|July|"
-        r"August|September|October|November|December)?\s*\d{0,4})?\s*$", re.I)
-
     @classmethod
     def _strip_dateline_node(cls, root) -> None:
         """Remove the dateline text node; the reader shows the date itself."""
@@ -219,7 +239,7 @@ class PaulGrahamSource(Source):
             text = str(node).strip()
             if not text:
                 continue
-            if cls._DATELINE_ONLY.match(text):
+            if cls._DATELINE_START.match(text):
                 node.extract()
             return  # only ever the first piece of body text
 

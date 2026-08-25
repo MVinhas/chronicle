@@ -55,11 +55,27 @@ def recipe_for(host: str) -> dict | None:
     return None
 
 
+# WordPress answers on one of these even when pretty permalinks are off.
+_WP_PATHS = ("/wp-json/wp/v2/posts?per_page=1",
+             "/?rest_route=/wp/v2/posts&per_page=1")
+
+# Ordered most complete first. A post-specific sitemap beats a generic index.
+_SITEMAP_PATHS = ("/post-sitemap.xml", "/sitemap-posts.xml",
+                  "/wp-sitemap-posts-post-1.xml", "/sitemap_index.xml",
+                  "/wp-sitemap.xml", "/sitemap.xml", "/sitemap-index.xml")
+
+_GHOST_KEY_RE = re.compile(
+    r'(?:key|apiKey)["\']?\s*[:=]\s*["\']([0-9a-f]{26})["\']', re.I)
+
+
 def detect(url: str) -> dict:
     """Work out how to ingest a site the user just added.
 
-    Returns {plugin, name, homepage, config, note}. Probing is best-effort:
-    a site we cannot classify still works through the generic source.
+    Routes are tried most-complete first, and each probe is given real retries.
+    A feed is the last resort rather than an early exit: it usually carries only
+    the newest handful of posts, so silently settling for one would build a
+    stunted archive and look like success. When that is all there is, the result
+    says so via `partial`.
     """
     url = url.strip()
     if not re.match(r"^https?://", url):
@@ -67,54 +83,63 @@ def detect(url: str) -> dict:
     parsed = urlparse(url)
     host = parsed.netloc.lower()
     base = f"{parsed.scheme}://{parsed.netloc}"
-    name = host.replace("www.", "").split(".")[0].replace("-", " ").title()
 
     recipe = recipe_for(host)
     if recipe is not None:
         return {"plugin": recipe["plugin"], "name": recipe["name"],
-                "homepage": base, "config": {},
+                "homepage": base, "config": {}, "partial": False,
                 "detected": "built-in recipe", "note": recipe["note"]}
 
-    title = _site_title(base)
-    if title:
-        name = title
+    # The bare hostname is the honest fallback. Truncating at the first dot
+    # turns nav.al into "Nav", which is simply wrong.
+    name = _site_title(base) or host.replace("www.", "")
 
-    # WordPress REST API — the best generic route when present.
-    try:
-        resp = net.fetch(f"{base}/wp-json/wp/v2/posts?per_page=1",
-                         headers={"Accept": "application/json"}, timeout=20, retries=1)
+    # 1. WordPress REST API -- every post, publisher timestamps, full bodies.
+    for path in _WP_PATHS:
+        try:
+            resp = net.fetch(base + path, headers={"Accept": "application/json"},
+                             timeout=25, retries=2)
+        except net.FetchError:
+            continue
         if resp.status == 200 and resp.body.strip().startswith(b"["):
             total = resp.headers.get("x-wp-total")
+            root = (f"{base}/wp-json/wp/v2" if path.startswith("/wp-json")
+                    else f"{base}/?rest_route=/wp/v2")
             return {"plugin": "wordpress", "name": name, "homepage": base,
-                    "config": {"api_root": f"{base}/wp-json/wp/v2"},
-                    "detected": f"WordPress REST API ({total or '?'} posts)"}
-    except net.FetchError:
-        pass
+                    "config": {"api_root": root}, "partial": False,
+                    "detected": f"WordPress REST API"
+                                f"{f' ({total} posts)' if total else ''}"}
 
-    # Ghost — the front-end embeds its own public content key.
+    # 2. Ghost -- the front end embeds its own public content key.
     try:
-        html = net.fetch_text(base, timeout=20, retries=1)
-        m = re.search(r'(?:key|apiKey)["\']?\s*[:=]\s*["\']([0-9a-f]{26})["\']', html)
+        html = net.fetch_text(base, timeout=25, retries=2)
+        m = _GHOST_KEY_RE.search(html)
         if m and ("ghost" in html.lower() or "/ghost/api/" in html):
             return {"plugin": "ghost", "name": name, "homepage": base,
-                    "config": {"content_key": m.group(1)},
+                    "config": {"content_key": m.group(1)}, "partial": False,
                     "detected": "Ghost Content API"}
     except net.FetchError:
         pass
 
-    for hint in ("/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml",
-                 "/sitemap-posts.xml"):
+    # 3. A sitemap still enumerates the whole archive.
+    for path in _SITEMAP_PATHS:
         try:
-            resp = net.fetch(base + hint, timeout=15, retries=1)
-            if b"<urlset" in resp.body[:2000] or b"<sitemapindex" in resp.body[:2000]:
-                return {"plugin": "generic", "name": name, "homepage": base,
-                        "config": {"strategy": "sitemap", "sitemap": hint},
-                        "detected": "sitemap"}
+            resp = net.fetch(base + path, timeout=20, retries=2)
         except net.FetchError:
             continue
+        head = resp.body[:2000]
+        if b"<urlset" in head or b"<sitemapindex" in head:
+            return {"plugin": "generic", "name": name, "homepage": base,
+                    "config": {"strategy": "sitemap", "sitemap": path},
+                    "partial": False, "detected": f"sitemap ({path})"}
 
+    # 4. Nothing machine-readable. The generic source will still try the
+    #    blog's own archive index (and its pagination) before falling back to
+    #    a feed, so leave the strategy open rather than pinning it to "feed".
     return {"plugin": "generic", "name": name, "homepage": base,
-            "config": {"strategy": "feed"}, "detected": "RSS/Atom feed (may be partial)"}
+            "config": {"strategy": "auto"}, "partial": True,
+            "detected": "no API or sitemap — will crawl the blog's archive, "
+                        "then fall back to its feed"}
 
 
 def _site_title(base: str) -> str | None:

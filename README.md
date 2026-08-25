@@ -84,11 +84,15 @@ stays undated. Chronicle would rather show you a gap than invent a date.
 
 ## Reading
 
-The reader is a deliberate, single light "paper" surface — no dark mode, no
-social features, no recommendations, no animation. Typography is the feature:
-Source Serif 4 at a ~65-character measure with 1.62 leading. Headings, lists,
-quotations, code, tables, figures and captions are preserved, and images are
-downloaded and cached locally so the library keeps working offline.
+The reader is deliberately plain — no social features, no recommendations, no
+animation. Typography is the feature: Source Serif 4 at a ~65-character measure
+with 1.62 leading. Headings, lists, quotations, code, tables, figures and
+captions are preserved, and images are downloaded and cached locally so the
+library keeps working offline.
+
+Two palettes, a warm paper light and a low-contrast dark, neither using pure
+black or pure white. Chronicle follows the desktop's preference by default;
+`Ctrl+T` cycles system → light → dark and the choice is remembered.
 
 Reading position is remembered per article, and the queue resumes where you left
 off.
@@ -104,6 +108,7 @@ off.
 | `R` | mark read / unread |
 | `L` / `Esc` | library |
 | `Ctrl+F` or `/` | search |
+| `Ctrl+T` | switch theme |
 | `F5` | update archive |
 | `Ctrl+O` | open the original page |
 

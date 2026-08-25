@@ -29,6 +29,7 @@ class Stub:
     base_url: str | None = None      # for resolving relative links in raw_html
     content_source: str = ""
     status_hint: str | None = None   # e.g. 'paywalled'
+    extra: dict = field(default_factory=dict)  # adapter-specific, e.g. a snapshot id
 
 
 @dataclass
@@ -79,6 +80,10 @@ class Source:
     display_name: str = "Generic"
     # CSS selectors tried, in order, before falling back to density scoring.
     content_selectors: list[str] = []
+    # How many article bodies to fetch at once. Kept modest by default: these
+    # are someone else's servers, and the point is a complete archive rather
+    # than a fast one.
+    fetch_concurrency: int = 4
     # Images matching these substrings are decoration, not content.
     image_blocklist: tuple[str, ...] = (
         "trans_1x1.gif", "spacer.gif", "pixel.gif", "1x1.png",
@@ -102,7 +107,7 @@ class Source:
     # -- content -----------------------------------------------------------
 
     def fetch_content(self, ctx: Context, url: str, stub_html: str | None = None,
-                      base_url: str | None = None) -> Content:
+                      base_url: str | None = None, extra: dict | None = None) -> Content:
         """Default: fetch the page and run the shared extractor."""
         if stub_html:
             return self.clean(stub_html, base_url or url, source="feed")

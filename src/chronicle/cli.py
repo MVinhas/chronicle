@@ -36,6 +36,9 @@ def cmd_add(args) -> int:
     print(f"Inspecting {args.url} …")
     spec = sources.detect(args.url)
     print(f"  detected: {spec['detected']}")
+    if spec.get("partial"):
+        print("  note    : this route exposes only recent posts, so the archive "
+              "will be incomplete.")
     print(f"  name    : {spec['name']}")
     print(f"  plugin  : {spec['plugin']}")
     slug = args.slug or spec["homepage"].split("//")[-1].split("/")[0] \
@@ -60,6 +63,17 @@ def cmd_remove(args) -> int:
         return 1
     db.delete_source(conn, row["id"])
     print(f"Removed {row['name']} and {_fmt_int(n)} articles.")
+    return 0
+
+
+def cmd_rename(args) -> int:
+    conn = db.get_conn()
+    row = conn.execute("SELECT * FROM sources WHERE slug=?", (args.slug,)).fetchone()
+    if not row:
+        print(f"No such source: {args.slug}", file=sys.stderr)
+        return 1
+    db.rename_source(conn, row["id"], args.name)
+    print(f"{row['name']} is now {args.name}")
     return 0
 
 
@@ -203,6 +217,10 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("remove", help="stop following a blog")
     r.add_argument("slug"); r.add_argument("--yes", action="store_true")
     r.set_defaults(fn=cmd_remove)
+
+    rn = sub.add_parser("rename", help="change a blog's display name")
+    rn.add_argument("slug"); rn.add_argument("name")
+    rn.set_defaults(fn=cmd_rename)
 
     e = sub.add_parser("enable", help="enable or disable a blog")
     e.add_argument("slug"); e.add_argument("--off", action="store_true")

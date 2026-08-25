@@ -139,6 +139,12 @@ class SourcesView(Gtk.Box):
             toggle.connect("state-set", self._on_toggle, src["id"])
             row.add_suffix(toggle)
 
+            rename = Gtk.Button(icon_name="document-edit-symbolic",
+                                valign=Gtk.Align.CENTER, css_classes=["flat"],
+                                tooltip_text="Rename this blog")
+            rename.connect("clicked", self._on_rename, src)
+            row.add_suffix(rename)
+
             sync_btn = Gtk.Button(icon_name="view-refresh-symbolic",
                                   valign=Gtk.Align.CENTER, css_classes=["flat"],
                                   tooltip_text="Update this archive")
@@ -191,6 +197,28 @@ class SourcesView(Gtk.Box):
 
     def _on_sync_one(self, _btn, source_id) -> None:
         self.emit("sync-requested", [source_id])
+
+    def _on_rename(self, _btn, src) -> None:
+        dialog = Adw.AlertDialog(
+            heading=f"Rename {src['name']}",
+            body="Chronicle guesses a name from the site itself, which is not "
+                 "always the one you would pick.")
+        entry = Gtk.Entry(text=src["name"], activates_default=True)
+        dialog.set_extra_child(entry)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("rename", "Rename")
+        dialog.set_response_appearance("rename", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("rename")
+
+        def done(_d, response):
+            if response == "rename":
+                db.rename_source(self.get_conn(), src["id"], entry.get_text())
+                self.reload()
+                self.emit("library-changed")
+
+        dialog.connect("response", done)
+        dialog.present(self.window)
+        entry.grab_focus()
 
     def _on_remove(self, _btn, src) -> None:
         conn = self.get_conn()
@@ -278,9 +306,9 @@ class SourcesView(Gtk.Box):
             return False
         self.reload()
         self.emit("library-changed")
-        toast = Adw.Toast(
-            title=f"Added {spec['name']} — via {spec['detected']}",
-            button_label="Build archive", timeout=8)
+        title = f"Added {spec['name']} — via {spec['detected']}"
+        toast = Adw.Toast(title=title, button_label="Build archive",
+                          timeout=12 if spec.get("partial") else 8)
         toast.connect("button-clicked", lambda *_: self.emit("sync-requested", None))
         self.window.toasts.add_toast(toast)
         return False
