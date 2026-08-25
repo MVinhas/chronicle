@@ -1,6 +1,8 @@
 
 build-aux/.dev-manifest.json
 build-aux/probe.json
+.claude/
+CLAUDE.md
 *.db
 *.db-shm
 *.db-wal
