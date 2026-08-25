@@ -1,0 +1,7 @@
+#!/bin/sh
+# Chronicle's command line, inside the app sandbox.
+# Running it here (rather than on the host) is what guarantees it uses the same
+# library as the GUI: a Flatpak app's data lives in ~/.var/app/<id>/data, which
+# other sandboxes cannot see.
+export PYTHONPATH="/app/share/chronicle${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m chronicle.cli "$@"

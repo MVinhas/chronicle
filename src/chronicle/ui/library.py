@@ -1,0 +1,256 @@
+"""The library view: the unified chronological queue."""
+from __future__ import annotations
+
+from datetime import datetime
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
+
+from .. import dates, db  # noqa: E402
+from .style import reading_minutes  # noqa: E402
+
+PAGE_SIZE = 400
+
+
+class RowItem(GObject.Object):
+    """One line in the queue — either a year heading or an article."""
+
+    __gtype_name__ = "ChronicleRowItem"
+
+    def __init__(self, kind: str, label: str = "", row=None):
+        super().__init__()
+        self.kind = kind          # 'header' | 'article'
+        self.label = label
+        self.row = row
+        self.article_id = row["id"] if row is not None else 0
+
+
+class LibraryView(Gtk.Box):
+    """Search, filter and pick from the whole archive in date order."""
+
+    __gtype_name__ = "ChronicleLibraryView"
+
+    __gsignals__ = {
+        "article-chosen": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
+    }
+
+    def __init__(self, get_conn):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL)
+        self.get_conn = get_conn
+        self.scope = "all"
+        self.search_text = ""
+        self._offset = 0
+        self._exhausted = False
+
+        self.store = Gio.ListStore(item_type=RowItem)
+        self._build_ui()
+
+    # -- construction ------------------------------------------------------
+
+    def _build_ui(self) -> None:
+        header_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
+                               margin_start=18, margin_end=18,
+                               margin_top=10, margin_bottom=6, spacing=10)
+        header = Adw.Clamp(maximum_size=900, child=header_inner)
+
+        self.search = Gtk.SearchEntry(placeholder_text="Search titles…",
+                                      hexpand=True)
+        self.search.connect("search-changed", self._on_search)
+        header_inner.append(self.search)
+
+        switcher = Gtk.Box(spacing=6, halign=Gtk.Align.CENTER)
+        self._buttons: dict[str, Gtk.ToggleButton] = {}
+        first = None
+        for scope, label in (("all", "All"), ("unread", "Unread"),
+                             ("favourites", "Favourites"), ("read", "Read")):
+            btn = Gtk.ToggleButton(label=label)
+            btn.add_css_class("chronicle-filter")
+            if first is None:
+                first = btn
+                btn.set_active(True)
+            else:
+                btn.set_group(first)
+            btn.connect("toggled", self._on_scope, scope)
+            self._buttons[scope] = btn
+            switcher.append(btn)
+        header_inner.append(switcher)
+
+        self.summary = Gtk.Label(xalign=0.5, css_classes=["dim-label", "caption"])
+        header_inner.append(self.summary)
+        self.append(header)
+
+        factory = Gtk.SignalListItemFactory()
+        factory.connect("setup", self._setup_row)
+        factory.connect("bind", self._bind_row)
+
+        self.selection = Gtk.NoSelection(model=self.store)
+        self.listview = Gtk.ListView(model=self.selection, factory=factory,
+                                     vexpand=True, single_click_activate=True)
+        self.listview.add_css_class("navigation-sidebar")
+        self.listview.connect("activate", self._on_activate)
+
+        self.scroller = Gtk.ScrolledWindow(vexpand=True,
+                                           hscrollbar_policy=Gtk.PolicyType.NEVER)
+        self.scroller.set_child(Adw.Clamp(maximum_size=900, child=self.listview))
+        self.scroller.get_vadjustment().connect("value-changed", self._maybe_load_more)
+
+        self.empty = Adw.StatusPage(
+            icon_name="document-open-recent-symbolic",
+            title="Nothing here yet",
+            description="Add a blog from the Blogs tab, then build its archive "
+                        "to start reading.")
+
+        self.stack = Gtk.Stack(vexpand=True)
+        self.stack.add_named(self.scroller, "list")
+        self.stack.add_named(self.empty, "empty")
+        self.append(self.stack)
+
+    # -- row rendering -----------------------------------------------------
+
+    def _setup_row(self, _factory, item) -> None:
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14,
+                      margin_start=16, margin_end=16,
+                      margin_top=7, margin_bottom=7)
+
+        date = Gtk.Label(xalign=0, width_chars=11, css_classes=["dim-label",
+                                                               "numeric", "caption"])
+        date.set_valign(Gtk.Align.START)
+        box.append(date)
+
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True)
+        title = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END,
+                          lines=2, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR)
+        title.set_max_width_chars(64)
+        meta = Gtk.Label(xalign=0, css_classes=["dim-label", "caption"],
+                         ellipsize=Pango.EllipsizeMode.END)
+        text.append(title)
+        text.append(meta)
+        box.append(text)
+
+        star = Gtk.Image(icon_name="starred-symbolic", css_classes=["accent"])
+        star.set_valign(Gtk.Align.CENTER)
+        box.append(star)
+
+        heading = Gtk.Label(xalign=0, css_classes=["heading"],
+                            margin_start=16, margin_top=20, margin_bottom=4)
+
+        wrapper = Gtk.Stack()
+        wrapper.add_named(box, "article")
+        wrapper.add_named(heading, "header")
+        item.set_child(wrapper)
+        item._parts = (wrapper, date, title, meta, star, heading)
+
+    def _bind_row(self, _factory, item) -> None:
+        wrapper, date, title, meta, star, heading = item._parts
+        obj = item.get_item()
+
+        if obj.kind == "header":
+            heading.set_label(obj.label)
+            wrapper.set_visible_child_name("header")
+            item.set_activatable(False)
+            item.set_selectable(False)
+            return
+
+        wrapper.set_visible_child_name("article")
+        item.set_activatable(True)
+        row = obj.row
+
+        date.set_label(dates.format_short(row["published_at"], row["date_precision"]))
+        if row["date_confidence"] in ("inferred", "unknown"):
+            date.set_tooltip_text(dates.CONFIDENCE_NOTE.get(row["date_confidence"], ""))
+            date.add_css_class("warning")
+        else:
+            date.set_tooltip_text(None)
+            date.remove_css_class("warning")
+
+        title.set_label(row["title"] or "Untitled")
+        if row["read_at"]:
+            title.add_css_class("dim-label")
+        else:
+            title.remove_css_class("dim-label")
+
+        bits = [row["source_name"]]
+        if row["word_count"]:
+            bits.append(f"{reading_minutes(row['word_count'])} min")
+        if row["image_count"]:
+            bits.append(f"{row['image_count']} image" +
+                        ("s" if row["image_count"] != 1 else ""))
+        if row["content_status"] == "paywalled":
+            bits.append("partial — paywalled")
+        meta.set_label("  ·  ".join(bits))
+
+        star.set_visible(bool(row["favourite_at"]))
+
+    # -- data --------------------------------------------------------------
+
+    def reload(self) -> None:
+        self._offset = 0
+        self._exhausted = False
+        self.store.remove_all()
+        self._last_year = None
+        self._load_page()
+        self._update_summary()
+        self.stack.set_visible_child_name(
+            "list" if self.store.get_n_items() else "empty")
+
+    def _load_page(self) -> None:
+        if self._exhausted:
+            return
+        conn = self.get_conn()
+        rows = db.queue(conn, scope=self.scope, limit=PAGE_SIZE, offset=self._offset,
+                        search=self.search_text or None)
+        if len(rows) < PAGE_SIZE:
+            self._exhausted = True
+        self._offset += len(rows)
+
+        additions = []
+        for row in rows:
+            year = self._year_label(row)
+            if year != getattr(self, "_last_year", None):
+                additions.append(RowItem("header", year))
+                self._last_year = year
+            additions.append(RowItem("article", row=row))
+        for item in additions:
+            self.store.append(item)
+
+    @staticmethod
+    def _year_label(row) -> str:
+        if not row["published_at"]:
+            return "Undated"
+        return str(datetime.fromisoformat(row["published_at"]).year)
+
+    def _maybe_load_more(self, adj) -> None:
+        if self._exhausted:
+            return
+        if adj.get_value() + adj.get_page_size() >= adj.get_upper() - 600:
+            self._load_page()
+
+    def _update_summary(self) -> None:
+        counts = db.queue_counts(self.get_conn())
+        text = (f"{counts['all']:,} articles  ·  {counts['unread']:,} unread  ·  "
+                f"{counts['favourites']:,} favourites").replace(",", " ")
+        if counts["undated"]:
+            text += f"  ·  {counts['undated']} undated"
+        self.summary.set_label(text)
+
+    # -- events ------------------------------------------------------------
+
+    def _on_search(self, entry) -> None:
+        self.search_text = entry.get_text().strip()
+        self.reload()
+
+    def _on_scope(self, button, scope) -> None:
+        if button.get_active():
+            self.scope = scope
+            self.reload()
+
+    def _on_activate(self, _view, position) -> None:
+        obj = self.store.get_item(position)
+        if obj is not None and obj.kind == "article":
+            self.emit("article-chosen", obj.article_id)
+
+    def focus_search(self) -> None:
+        self.search.grab_focus()

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Chronicle launcher inside the Flatpak sandbox.
+export PYTHONPATH="/app/share/chronicle${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m chronicle "$@"

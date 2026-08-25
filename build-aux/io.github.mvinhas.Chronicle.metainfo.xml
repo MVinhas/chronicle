@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.mvinhas.Chronicle</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>Chronicle</name>
+  <summary>Read your blogs oldest first</summary>
+
+  <description>
+    <p>
+      Chronicle builds a complete historical archive of the blogs you follow and
+      merges every article into a single reading queue, ordered by original
+      publication date regardless of which site it came from. It is a way to read
+      a body of writing in the order it was written, rather than in the order you
+      happened to discover it.
+    </p>
+    <p>
+      Unlike a feed reader, Chronicle is not limited to whatever a site's RSS feed
+      happens to expose. When you add a blog it probes the site and picks the route
+      that recovers the most history: a WordPress REST API, a Ghost content API, a
+      sitemap crawl, or a feed as a last resort. Sites that need special handling
+      can get a purpose-built adapter.
+    </p>
+    <p>Chronicle takes publication dates seriously:</p>
+    <ul>
+      <li>It records the original publication date, never the date it discovered an article, and never a later revision date.</li>
+      <li>Every date carries its provenance and a confidence level, so a date read from a page's dateline is visibly different from one supplied by the publisher.</li>
+      <li>Precision is kept honestly — a month-precision date is shown as a month, not as a made-up day.</li>
+      <li>Articles whose date genuinely cannot be determined are collected separately rather than being placed somewhere invented.</li>
+    </ul>
+    <p>
+      Articles are read inside the application on a typographic reading surface,
+      with headings, lists, quotations, code, tables and images preserved and
+      cached locally so the library keeps working offline. Reading position is
+      remembered per article, and the queue resumes where you left off.
+    </p>
+    <p>
+      The interface is deliberately minimal: no recommendations, no social
+      features, no gamification. Just the next article.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.mvinhas.Chronicle.desktop</launchable>
+
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/MVinhas/chronicle/v1.0.0/data/screenshots/reader.png</image>
+      <caption>Reading an article on a typographic reading surface</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/MVinhas/chronicle/v1.0.0/data/screenshots/library.png</image>
+      <caption>The reading queue, oldest first, mixing every blog you follow</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/MVinhas/chronicle/v1.0.0/data/screenshots/blogs.png</image>
+      <caption>Managing the blogs you follow and building their archives</caption>
+    </screenshot>
+  </screenshots>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#f0e8da</color>
+    <color type="primary" scheme_preference="dark">#4a3f33</color>
+  </branding>
+
+  <categories>
+    <category>Network</category>
+    <category>News</category>
+    <category>Office</category>
+  </categories>
+
+  <keywords>
+    <keyword>blog</keyword>
+    <keyword>reader</keyword>
+    <keyword>archive</keyword>
+    <keyword>essays</keyword>
+    <keyword>chronological</keyword>
+    <keyword>offline</keyword>
+  </keywords>
+
+  <content_rating type="oars-1.1"/>
+
+  <developer id="io.github.mvinhas">
+    <name>Micael Vinhas</name>
+  </developer>
+
+  <url type="homepage">https://github.com/MVinhas/chronicle</url>
+  <url type="bugtracker">https://github.com/MVinhas/chronicle/issues</url>
+  <url type="vcs-browser">https://github.com/MVinhas/chronicle</url>
+  <url type="contribute">https://github.com/MVinhas/chronicle/blob/main/CONTRIBUTING.md</url>
+
+  <requires>
+    <display_length compare="ge">560</display_length>
+  </requires>
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+
+  <releases>
+    <release version="1.0.0" date="2026-08-25">
+      <description>
+        <p>First release.</p>
+        <ul>
+          <li>A single chronological reading queue across every blog you follow, oldest first.</li>
+          <li>Archive building via WordPress REST, Ghost content API, sitemap crawl or feed, with adapters for sites that need special handling.</li>
+          <li>Publication dates with precision, confidence and provenance.</li>
+          <li>Favourites, reading progress and full-text search.</li>
+          <li>Local image caching for offline reading.</li>
+        </ul>
+      </description>
+    </release>
+  </releases>
+</component>

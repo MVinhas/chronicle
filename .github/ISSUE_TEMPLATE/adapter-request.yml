@@ -1,0 +1,50 @@
+name: Adapter request
+description: A blog whose archive Chronicle cannot recover properly
+title: "Adapter: <site>"
+labels: ["adapter-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Generic detection (WordPress API → Ghost API → sitemap → feed) handles
+        most blogs. Open this if a site you read needs purpose-built handling.
+  - type: input
+    id: url
+    attributes:
+      label: Blog URL
+      placeholder: https://example.com
+    validations:
+      required: true
+  - type: dropdown
+    id: problem
+    attributes:
+      label: What goes wrong
+      multiple: true
+      options:
+        - Only recent posts are found, not the full history
+        - No posts are found at all
+        - Publication dates are wrong
+        - Publication dates are missing (articles land in Undated)
+        - Article text is incomplete or full of navigation junk
+        - Images are missing
+        - The site blocks Chronicle (403 / bot protection)
+    validations:
+      required: true
+  - type: textarea
+    id: detail
+    attributes:
+      label: Details
+      description: |
+        What did `chronicle-cli add <url>` report as the detected route? Roughly
+        how many posts should there be, and how many did Chronicle find?
+      placeholder: |
+        Detected: RSS/Atom feed (may be partial)
+        Found 10 articles; the blog has ~400 going back to 2009.
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything you already know
+      description: |
+        An undocumented API, an archive page listing every post, a sitemap, or
+        where the publication date actually lives in the page. Optional, but it
+        turns a research task into a small one.

@@ -1,0 +1,37 @@
+name: Bug report
+description: Something in Chronicle behaves incorrectly
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Chronicle version
+      description: "`flatpak info io.github.mvinhas.Chronicle`, or the commit if built from source"
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      placeholder: |
+        Distribution and version:
+        GNOME runtime version:
+        Installed from Flathub or built from source:
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output
+      description: "Run `flatpak run io.github.mvinhas.Chronicle` from a terminal and paste anything it prints."
+      render: shell

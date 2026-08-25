@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Chronicle
+GenericName=Chronological Blog Reader
+Comment=Read the blogs you love in one chronological queue, oldest first
+Exec=chronicle
+Icon=io.github.mvinhas.Chronicle
+Terminal=false
+Type=Application
+Categories=Network;News;Feed;Office;Viewer;
+Keywords=blog;rss;reader;archive;articles;essays;reading;chronological;
+StartupNotify=true
+StartupWMClass=io.github.mvinhas.Chronicle

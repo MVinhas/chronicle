@@ -1,0 +1,5 @@
+#!/bin/sh
+# Run the Chronicle CLI from a source checkout.
+here=$(cd "$(dirname "$0")/.." && pwd)
+export PYTHONPATH="$here/vendor:$here/src${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m chronicle.cli "$@"

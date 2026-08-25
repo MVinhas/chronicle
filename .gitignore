@@ -1,0 +1,11 @@
+
+*.db
+*.db-shm
+*.db-wal
+devlib/
+.flatpak-build/
+.flatpak-builder/
+# Local build/runtime artefacts
+__pycache__/
+*.py[cod]
+.scratch/

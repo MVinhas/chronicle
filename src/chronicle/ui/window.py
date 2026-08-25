@@ -1,0 +1,435 @@
+"""The main window: reader, library and blog management."""
+from __future__ import annotations
+
+import logging
+import threading
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
+
+from .. import dates, db, sync  # noqa: E402
+from .library import LibraryView  # noqa: E402
+from .reader import ReaderView  # noqa: E402
+from .sources_view import SourcesView  # noqa: E402
+from .style import reading_minutes  # noqa: E402
+
+log = logging.getLogger("chronicle.window")
+
+# Reading past this fraction of an article counts as having read it.
+READ_THRESHOLD = 0.92
+
+APP_CSS = b"""
+.chronicle-filter { padding: 2px 14px; min-height: 26px; }
+.chronicle-position { font-size: 0.82em; }
+.chronicle-reader-title { font-weight: 600; }
+"""
+
+
+class MainWindow(Adw.ApplicationWindow):
+    __gtype_name__ = "ChronicleWindow"
+
+    def __init__(self, app):
+        super().__init__(application=app, title="Chronicle",
+                         default_width=1120, default_height=820)
+        self.set_size_request(560, 480)
+        self._conn = db.get_conn()
+        self.current = None
+        self._scroll_frac = 0.0
+        self._marked_read = False
+
+        self.syncer = sync.Syncer(on_progress=self._on_sync_progress)
+
+        self._load_css()
+        self._build_ui()
+        self._install_actions()
+        self.refresh_library()
+        self.resume()
+
+    # -- infrastructure ----------------------------------------------------
+
+    def conn(self):
+        return self._conn
+
+    @staticmethod
+    def _load_css() -> None:
+        provider = Gtk.CssProvider()
+        provider.load_from_data(APP_CSS)
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+    # -- layout ------------------------------------------------------------
+
+    def _build_ui(self) -> None:
+        self.toasts = Adw.ToastOverlay()
+        self.stack = Adw.ViewStack()
+
+        self.stack.add_titled_with_icon(
+            self._build_reader_page(), "reader", "Read", "format-text-rich-symbolic")
+        self.stack.add_titled_with_icon(
+            self._build_library_page(), "library", "Library", "view-list-symbolic")
+        self.stack.add_titled_with_icon(
+            self._build_sources_page(), "sources", "Blogs", "user-bookmarks-symbolic")
+
+        switcher = Adw.ViewSwitcher(stack=self.stack,
+                                    policy=Adw.ViewSwitcherPolicy.WIDE)
+        self.header = Adw.HeaderBar(title_widget=switcher)
+
+        menu = Gio.Menu()
+        menu.append("Update archive", "win.sync")
+        menu.append("Open original in browser", "win.open-external")
+        menu.append("Keyboard shortcuts", "win.shortcuts")
+        menu.append("About Chronicle", "win.about")
+        self.header.pack_end(Gtk.MenuButton(icon_name="open-menu-symbolic",
+                                            menu_model=menu, tooltip_text="Menu"))
+
+        self.sync_button = Gtk.Button(icon_name="view-refresh-symbolic",
+                                      tooltip_text="Update archive (F5)",
+                                      action_name="win.sync")
+        self.header.pack_start(self.sync_button)
+
+        outer = Adw.ToolbarView()
+        outer.add_top_bar(self.header)
+        outer.set_content(self.stack)
+        self.toasts.set_child(outer)
+        self.set_content(self.toasts)
+
+        self.stack.connect("notify::visible-child-name", self._on_page_changed)
+
+    def _build_reader_page(self) -> Gtk.Widget:
+        self.reader = ReaderView()
+        self.reader.connect("scrolled", self._on_scrolled)
+        self.reader.connect("link-activated", self._on_link)
+
+        view = Adw.ToolbarView()
+        view.set_content(self.reader)
+
+        bar = Gtk.CenterBox(margin_start=10, margin_end=10,
+                            margin_top=5, margin_bottom=5)
+
+        self.prev_button = Gtk.Button(icon_name="go-previous-symbolic",
+                                      tooltip_text="Previous article (←)",
+                                      action_name="win.previous",
+                                      css_classes=["flat"])
+        self.next_button = Gtk.Button(icon_name="go-next-symbolic",
+                                      tooltip_text="Next article (→)",
+                                      action_name="win.next",
+                                      css_classes=["flat"])
+
+        left = Gtk.Box(spacing=4)
+        left.append(self.prev_button)
+        self.fav_button = Gtk.ToggleButton(icon_name="non-starred-symbolic",
+                                           tooltip_text="Favourite (F)",
+                                           css_classes=["flat"])
+        self.fav_button.connect("toggled", self._on_favourite_toggled)
+        left.append(self.fav_button)
+
+        self.read_button = Gtk.ToggleButton(icon_name="object-select-symbolic",
+                                            tooltip_text="Mark as read (R)",
+                                            css_classes=["flat"])
+        self.read_button.connect("toggled", self._on_read_toggled)
+        left.append(self.read_button)
+
+        right = Gtk.Box(spacing=4)
+        right.append(self.next_button)
+
+        self.position_label = Gtk.Label(css_classes=["dim-label",
+                                                     "chronicle-position"])
+        bar.set_start_widget(left)
+        bar.set_center_widget(self.position_label)
+        bar.set_end_widget(right)
+        view.add_bottom_bar(bar)
+        return view
+
+    def _build_library_page(self) -> Gtk.Widget:
+        self.library = LibraryView(self.conn)
+        self.library.connect("article-chosen", self._on_article_chosen)
+        return self.library
+
+    def _build_sources_page(self) -> Gtk.Widget:
+        self.sources_view = SourcesView(self.conn, self)
+        self.sources_view.connect("sync-requested", self._on_sync_requested)
+        self.sources_view.connect("cancel-requested", lambda *_: self.syncer.cancel())
+        self.sources_view.connect("library-changed", lambda *_: self.refresh_library())
+        return self.sources_view
+
+    # -- actions -----------------------------------------------------------
+
+    def _install_actions(self) -> None:
+        specs = [
+            ("next", self.go_next, ["<Alt>Right", "n", "j", "Page_Down"]),
+            ("previous", self.go_previous, ["<Alt>Left", "p", "k", "Page_Up"]),
+            ("favourite", self.toggle_favourite, ["f"]),
+            ("toggle-read", self.toggle_read, ["r"]),
+            ("library", lambda *_: self.show_page("library"), ["l", "Escape"]),
+            ("reader", lambda *_: self.show_page("reader"), ["<Control>1"]),
+            ("sources", lambda *_: self.show_page("sources"), ["<Control>2"]),
+            ("search", self.focus_search, ["<Control>f", "slash"]),
+            ("sync", self.start_sync, ["F5", "<Control>r"]),
+            ("open-external", self.open_external, ["<Control>o"]),
+            ("scroll-down", lambda *_: self.reader.scroll_by_page(1), ["space"]),
+            ("scroll-up", lambda *_: self.reader.scroll_by_page(-1), ["<Shift>space"]),
+            ("top", lambda *_: self.reader.scroll_home(), ["Home"]),
+            ("shortcuts", self.show_shortcuts, ["<Control>question"]),
+            ("about", self.show_about, []),
+        ]
+        app = self.get_application()
+        for name, handler, accels in specs:
+            action = Gio.SimpleAction.new(name, None)
+            action.connect("activate", handler)
+            self.add_action(action)
+            if accels:
+                app.set_accels_for_action(f"win.{name}", accels)
+
+    def show_page(self, name: str) -> None:
+        self.stack.set_visible_child_name(name)
+
+    def _on_page_changed(self, *_):
+        name = self.stack.get_visible_child_name()
+        if name == "library":
+            self.library.reload()
+        elif name == "sources":
+            self.sources_view.reload()
+
+    def focus_search(self, *_):
+        self.show_page("library")
+        self.library.focus_search()
+
+    # -- reading -----------------------------------------------------------
+
+    def resume(self) -> None:
+        """Open wherever the reader left off, or the oldest unread article."""
+        article = db.resume_article(self._conn)
+        if article is None:
+            counts = db.queue_counts(self._conn)
+            if counts["all"]:
+                self.reader.show_placeholder(
+                    "Everything read",
+                    "You have reached the end of the queue. New articles appear "
+                    "here after the next archive update.")
+            else:
+                self.reader.show_placeholder(
+                    "Your library is empty",
+                    "Open the <b>Blogs</b> tab and add a blog you read. "
+                    "Chronicle then works out how to recover its full history "
+                    "and builds the archive. The first build of a long-running "
+                    "blog takes a while — it fetches every article ever "
+                    "published, not just the recent ones.")
+            self._update_reader_chrome(None)
+            self.show_page("sources" if not db.list_sources(self._conn)
+                       else "reader")
+            return
+        self.open_article(article["id"], remember=False)
+
+    def open_article(self, article_id: int, remember: bool = True) -> None:
+        article = db.get_article(self._conn, article_id)
+        if article is None:
+            return
+        self.current = article
+        self._marked_read = bool(self._state_of(article_id)["read_at"]
+                                 if self._state_of(article_id) else False)
+
+        state = self._state_of(article_id)
+        scroll = state["scroll_pos"] if state else 0.0
+        self.reader.show_article(article, scroll if remember else scroll)
+        db.state_set(self._conn, "current_article_id", article_id)
+        self._update_reader_chrome(article)
+        self.show_page("reader")
+
+    def _state_of(self, article_id: int):
+        return self._conn.execute(
+            "SELECT * FROM reading_state WHERE article_id=?", (article_id,)).fetchone()
+
+    def _update_reader_chrome(self, article) -> None:
+        if article is None:
+            self.position_label.set_label("")
+            for w in (self.prev_button, self.next_button, self.fav_button,
+                      self.read_button):
+                w.set_sensitive(False)
+            return
+        for w in (self.prev_button, self.next_button, self.fav_button,
+                  self.read_button):
+            w.set_sensitive(True)
+
+        pos, total = db.position_in_queue(self._conn, article["id"])
+        label = dates.format_display(article["published_at"],
+                                     article["date_precision"],
+                                     article["date_confidence"])
+        minutes = reading_minutes(article["word_count"])
+        self.position_label.set_label(
+            f"{pos:,} of {total:,}".replace(",", " ") +
+            f"   ·   {article['source_name']}   ·   {label}   ·   {minutes} min")
+
+        state = self._state_of(article["id"])
+        self.fav_button.handler_block_by_func(self._on_favourite_toggled)
+        self.fav_button.set_active(bool(state and state["favourite_at"]))
+        self.fav_button.set_icon_name(
+            "starred-symbolic" if (state and state["favourite_at"])
+            else "non-starred-symbolic")
+        self.fav_button.handler_unblock_by_func(self._on_favourite_toggled)
+
+        self.read_button.handler_block_by_func(self._on_read_toggled)
+        self.read_button.set_active(bool(state and state["read_at"]))
+        self.read_button.handler_unblock_by_func(self._on_read_toggled)
+
+        self.prev_button.set_sensitive(
+            db.neighbour(self._conn, article["id"], -1) is not None)
+        self.next_button.set_sensitive(
+            db.neighbour(self._conn, article["id"], +1) is not None)
+
+    def go_next(self, *_):
+        if self.current is None:
+            return
+        self._flush_scroll()
+        nxt = db.neighbour(self._conn, self.current["id"], +1)
+        db.set_read(self._conn, self.current["id"], True)
+        if nxt is None:
+            self.toasts.add_toast(Adw.Toast(title="That was the last article",
+                                            timeout=3))
+            self._update_reader_chrome(self.current)
+            return
+        self.open_article(nxt["id"])
+
+    def go_previous(self, *_):
+        if self.current is None:
+            return
+        self._flush_scroll()
+        prev = db.neighbour(self._conn, self.current["id"], -1)
+        if prev is None:
+            self.toasts.add_toast(Adw.Toast(title="This is the oldest article",
+                                            timeout=3))
+            return
+        self.open_article(prev["id"])
+
+    def toggle_favourite(self, *_):
+        self.fav_button.set_active(not self.fav_button.get_active())
+
+    def _on_favourite_toggled(self, button) -> None:
+        if self.current is None:
+            return
+        now = db.toggle_favourite(self._conn, self.current["id"])
+        button.set_icon_name("starred-symbolic" if now
+                             else "non-starred-symbolic")
+        self.toasts.add_toast(Adw.Toast(
+            title="Added to favourites" if now else "Removed from favourites",
+            timeout=2))
+
+    def toggle_read(self, *_):
+        self.read_button.set_active(not self.read_button.get_active())
+
+    def _on_read_toggled(self, button) -> None:
+        if self.current is None:
+            return
+        db.set_read(self._conn, self.current["id"], button.get_active())
+        self._marked_read = button.get_active()
+
+    def _on_scrolled(self, _reader, fraction: float) -> None:
+        self._scroll_frac = fraction
+        if fraction >= READ_THRESHOLD and not self._marked_read and self.current:
+            self._marked_read = True
+            db.set_read(self._conn, self.current["id"], True)
+            self.read_button.handler_block_by_func(self._on_read_toggled)
+            self.read_button.set_active(True)
+            self.read_button.handler_unblock_by_func(self._on_read_toggled)
+
+    def _flush_scroll(self) -> None:
+        if self.current is not None:
+            db.set_scroll(self._conn, self.current["id"], self._scroll_frac)
+        self._scroll_frac = 0.0
+
+    def _on_article_chosen(self, _view, article_id: int) -> None:
+        self._flush_scroll()
+        self.open_article(article_id)
+
+    def _on_link(self, _reader, uri: str) -> None:
+        Gtk.UriLauncher(uri=uri).launch(self, None, None, None)
+
+    def open_external(self, *_):
+        if self.current and self.current["url"]:
+            self._on_link(None, self.current["url"])
+
+    # -- syncing -----------------------------------------------------------
+
+    def start_sync(self, *_):
+        self._on_sync_requested(None, None)
+
+    def _on_sync_requested(self, _widget, source_ids) -> None:
+        if self.syncer.running:
+            self.toasts.add_toast(Adw.Toast(title="An update is already running",
+                                            timeout=3))
+            return
+        self.sync_button.set_sensitive(False)
+        self.show_page("sources")
+        threading.Thread(target=self.syncer.sync_all, args=(source_ids,),
+                         daemon=True).start()
+
+    def _on_sync_progress(self, prog) -> None:
+        GLib.idle_add(self._apply_progress, prog)
+
+    def _apply_progress(self, prog) -> bool:
+        self.sources_view.set_progress(prog)
+        if prog.done:
+            self.sync_button.set_sensitive(True)
+            self.sources_view.reload()
+            self.refresh_library()
+            if prog.error:
+                self.toasts.add_toast(Adw.Toast(title=f"Update failed: {prog.error}",
+                                                timeout=8))
+            else:
+                self.toasts.add_toast(Adw.Toast(title=prog.message, timeout=5))
+            if self.current is None:
+                self.resume()
+        return False
+
+    def refresh_library(self) -> None:
+        if hasattr(self, "library"):
+            self.library.reload()
+        if self.current is not None:
+            self._update_reader_chrome(self.current)
+
+    # -- dialogs -----------------------------------------------------------
+
+    def show_shortcuts(self, *_):
+        pairs = [
+            ("Next article", "→ / N / J / Page Down"),
+            ("Previous article", "← / P / K / Page Up"),
+            ("Scroll", "Space / Shift+Space"),
+            ("Back to top", "Home"),
+            ("Favourite", "F"),
+            ("Mark read / unread", "R"),
+            ("Library", "L / Esc"),
+            ("Search", "Ctrl+F or /"),
+            ("Update archive", "F5"),
+            ("Open original", "Ctrl+O"),
+        ]
+        body = "\n".join(f"{k}   —   {v}" for k, v in pairs)
+        dialog = Adw.AlertDialog(heading="Keyboard shortcuts", body=body)
+        dialog.add_response("close", "Close")
+        dialog.present(self)
+
+    def show_about(self, *_):
+        s = db.stats(self._conn)
+        about = Adw.AboutDialog(
+            application_name="Chronicle",
+            application_icon="io.github.mvinhas.Chronicle",
+            version="1.0.0",
+            developer_name="Micael Vinhas",
+            comments=("A personal chronological library of the blogs you love.\n\n"
+                      f"{s['articles']:,} articles archived, spanning "
+                      f"{(s['oldest'] or '')[:4]} to {(s['newest'] or '')[:4]}."
+                      ).replace(",", " "),
+            license_type=Gtk.License.GPL_3_0,
+            website="https://github.com/mvinhas/chronicle")
+        about.add_credit_section("Typography", ["Source Serif 4 — Adobe (OFL)"])
+        about.present(self)
+
+    # -- shutdown ----------------------------------------------------------
+
+    def do_close_request(self) -> bool:
+        self._flush_scroll()
+        if self.syncer.running:
+            self.syncer.cancel()
+        return False
