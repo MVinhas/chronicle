@@ -11,9 +11,20 @@ def _xdg(env: str, default: str) -> Path:
     return Path(os.environ.get(env) or Path.home() / default)
 
 
-DATA_DIR = _xdg("XDG_DATA_HOME", ".local/share") / "chronicle"
-CACHE_DIR = _xdg("XDG_CACHE_HOME", ".cache") / "chronicle"
-CONFIG_DIR = _xdg("XDG_CONFIG_HOME", ".config") / "chronicle"
+# CHRONICLE_LIBRARY points the whole library elsewhere. Flatpak hard-sets
+# XDG_DATA_HOME for an app and ignores --env, so an XDG override cannot be used
+# to run against a second library; this can.
+_OVERRIDE = os.environ.get("CHRONICLE_LIBRARY")
+
+if _OVERRIDE:
+    _root = Path(_OVERRIDE).expanduser()
+    DATA_DIR = _root
+    CACHE_DIR = _root / "cache"
+    CONFIG_DIR = _root / "config"
+else:
+    DATA_DIR = _xdg("XDG_DATA_HOME", ".local/share") / "chronicle"
+    CACHE_DIR = _xdg("XDG_CACHE_HOME", ".cache") / "chronicle"
+    CONFIG_DIR = _xdg("XDG_CONFIG_HOME", ".config") / "chronicle"
 
 DB_PATH = DATA_DIR / "library.db"
 IMAGE_DIR = DATA_DIR / "images"

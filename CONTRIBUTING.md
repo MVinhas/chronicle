@@ -69,7 +69,7 @@ The app is Python 3 + GTK 4 + libadwaita + WebKitGTK 6, run against the GNOME
 SDK runtime.
 
 ```sh
-flatpak install flathub org.gnome.Platform//49 org.gnome.Sdk//49
+flatpak install flathub org.gnome.Platform//50 org.gnome.Sdk//50
 ./run-dev.sh          # run from the checkout
 tools/run-tests.sh    # unit tests: no network, no GUI
 ./build-flatpak.sh    # build and install the Flatpak

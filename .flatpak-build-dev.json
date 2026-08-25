@@ -1,7 +1,7 @@
 {
     "id": "io.github.mvinhas.Chronicle",
     "runtime": "org.gnome.Platform",
-    "runtime-version": "50",
+    "runtime-version": "49",
     "sdk": "org.gnome.Sdk",
     "command": "chronicle",
     "finish-args": [
@@ -9,7 +9,8 @@
         "--share=ipc",
         "--socket=wayland",
         "--socket=fallback-x11",
-        "--device=dri"
+        "--device=dri",
+        "--talk-name=org.freedesktop.portal.OpenURI"
     ],
     "cleanup": [
         "*.pyc",
@@ -38,14 +39,17 @@
             ],
             "sources": [
                 {
-                    "type": "git",
-                    "url": "https://github.com/MVinhas/chronicle.git",
-                    "tag": "v1.0.0",
-                    "commit": "PLACEHOLDER_COMMIT",
-                    "x-checker-data": {
-                        "type": "git",
-                        "tag-pattern": "^v([\\d.]+)$"
-                    }
+                    "type": "dir",
+                    "path": "..",
+                    "skip": [
+                        ".flatpak-build",
+                        ".flatpak-builder",
+                        ".scratch",
+                        ".git",
+                        "tests",
+                        "__pycache__",
+                        "devlib"
+                    ]
                 }
             ]
         }

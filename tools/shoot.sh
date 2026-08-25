@@ -26,7 +26,7 @@ timeout 90 flatpak run \
   --env=CHRONICLE_SHOT="$out" \
   --env=CHRONICLE_SHOT_PAGE="$page" \
   --env=CHRONICLE_SHOT_DELAY="$delay" \
-  --command=python3 org.gnome.Sdk//49 -m chronicle \
+  --command=python3 org.gnome.Sdk//50 -m chronicle \
   >"$here/.scratch/app.log" 2>&1 || true
 
 if [ -f "$out" ]; then

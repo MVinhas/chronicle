@@ -1,4 +1,5 @@
 
+build-aux/.dev-manifest.json
 *.db
 *.db-shm
 *.db-wal

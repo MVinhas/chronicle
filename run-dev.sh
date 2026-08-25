@@ -14,4 +14,4 @@ exec flatpak run \
   --env=XDG_CACHE_HOME="$app_data/cache" \
   --env=XDG_CONFIG_HOME="$app_data/config" \
   --env=GDK_BACKEND="${GDK_BACKEND:-wayland,x11}" \
-  --command=python3 org.gnome.Sdk//49 -m chronicle "$@"
+  --command=python3 org.gnome.Sdk//50 -m chronicle "$@"

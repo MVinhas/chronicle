@@ -1,0 +1,53 @@
+name: Flatpak
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive a manifest that builds this checkout
+        # The committed manifest pins a released git tag, which is what Flathub
+        # needs. CI has to build the code under test instead.
+        run: |
+          python3 - <<'PY'
+          import json
+          p = "build-aux/io.github.mvinhas.Chronicle.json"
+          m = json.load(open(p))
+          m["modules"][0]["sources"] = [{
+              "type": "dir", "path": "..",
+              "skip": [".flatpak-build", ".flatpak-builder", ".scratch",
+                       ".git", "tests", "__pycache__"],
+          }]
+          json.dump(m, open("build-aux/ci-manifest.json", "w"), indent=4)
+          PY
+
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: chronicle.flatpak
+          manifest-path: build-aux/ci-manifest.json
+          cache-key: flatpak-builder-${{ github.sha }}
+
+  metainfo:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate AppStream metainfo
+        run: |
+          appstreamcli validate --explain \
+            build-aux/io.github.mvinhas.Chronicle.metainfo.xml
+      - name: Validate desktop entry
+        run: |
+          desktop-file-validate build-aux/io.github.mvinhas.Chronicle.desktop

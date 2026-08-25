@@ -113,7 +113,7 @@ off.
 flatpak install flathub io.github.mvinhas.Chronicle
 ```
 
-Or build from source (requires Flatpak and the GNOME 49 runtime):
+Or build from source (requires Flatpak and the GNOME 50 runtime):
 
 ```sh
 git clone https://github.com/MVinhas/chronicle
@@ -160,6 +160,13 @@ Only one Chronicle process may hold the library at a time, so close the app
 before running a sync from the CLI; it will say so rather than starting a second
 writer.
 
+To keep a second, separate library — a scratch one for trying a blog out, say —
+set `CHRONICLE_LIBRARY`:
+
+```sh
+flatpak run --env=CHRONICLE_LIBRARY=~/scratch-library io.github.mvinhas.Chronicle
+```
+
 ## Design
 
 ```
@@ -175,7 +182,7 @@ src/chronicle/
 ```
 
 **Stack.** Python 3 + GTK 4 + libadwaita + WebKitGTK 6, packaged as a Flatpak
-against the GNOME 49 runtime. SQLite for storage. The only bundled third-party
+against the GNOME 50 runtime. SQLite for storage. The only bundled third-party
 code is BeautifulSoup and soupsieve, both pure Python; everything else is the
 standard library and the runtime.
 
