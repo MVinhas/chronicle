@@ -233,8 +233,8 @@ class MainWindow(Adw.ApplicationWindow):
                                  if self._state_of(article_id) else False)
 
         state = self._state_of(article_id)
-        scroll = state["scroll_pos"] if state else 0.0
-        self.reader.show_article(article, scroll if remember else scroll)
+        scroll = (state["scroll_pos"] if state else 0.0) if remember else 0.0
+        self.reader.show_article(article, scroll)
         db.state_set(self._conn, "current_article_id", article_id)
         self._update_reader_chrome(article)
         self.show_page("reader")

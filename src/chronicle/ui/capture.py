@@ -5,10 +5,13 @@ app renders its own window through GSK — the same renderer that draws it — a
 writes a PNG. That works on Wayland and X11 alike and needs no portal.
 
 Driven entirely by environment variables so it never affects normal runs:
-    CHRONICLE_SHOT       output PNG path (enables capture)
-    CHRONICLE_SHOT_PAGE  reader | library | sources   (default: reader)
-    CHRONICLE_SHOT_DELAY seconds to settle before capturing (default 3.5)
-    CHRONICLE_SHOT_QUIT  1 to exit after capturing (default 1)
+    CHRONICLE_SHOT          output PNG path (enables capture)
+    CHRONICLE_SHOT_PAGE     reader | library | sources   (default: reader)
+    CHRONICLE_SHOT_DELAY    seconds to settle before capturing (default 3.5)
+    CHRONICLE_SHOT_QUIT     1 to exit after capturing (default 1)
+    CHRONICLE_SHOT_SIZE     WxH to force the window to, e.g. 1280x800
+    CHRONICLE_SHOT_ARTICLE  article id to open, from the top, unscrolled
+    CHRONICLE_SHOT_SCROLL   0..1 fraction to scroll the library list to
 """
 from __future__ import annotations
 
@@ -26,6 +29,23 @@ log = logging.getLogger("chronicle.capture")
 
 def enabled() -> bool:
     return bool(os.environ.get("CHRONICLE_SHOT"))
+
+
+def _scroll_library(window, fraction: float) -> None:
+    """Scroll the queue so a screenshot can show a representative stretch."""
+    try:
+        adj = window.library.scroller.get_vadjustment()
+    except AttributeError:
+        return
+
+    def apply() -> bool:
+        span = adj.get_upper() - adj.get_page_size()
+        if span > 0:
+            adj.set_value(span * max(0.0, min(1.0, fraction)))
+        return False
+
+    # The list virtualises, so its extent is only known after a layout pass.
+    GLib.timeout_add(700, apply)
 
 
 def capture_window(window: Gtk.Window, path: str | Path) -> bool:
@@ -70,11 +90,28 @@ def arm(window) -> None:
     page = os.environ.get("CHRONICLE_SHOT_PAGE", "reader")
     delay = float(os.environ.get("CHRONICLE_SHOT_DELAY", "3.5"))
     should_quit = os.environ.get("CHRONICLE_SHOT_QUIT", "1") != "0"
+    size = os.environ.get("CHRONICLE_SHOT_SIZE")
+    article = os.environ.get("CHRONICLE_SHOT_ARTICLE")
+    scroll = os.environ.get("CHRONICLE_SHOT_SCROLL")
+
+    if size:
+        try:
+            w, h = (int(v) for v in size.lower().split("x", 1))
+            window.unmaximize()
+            window.set_default_size(w, h)
+            window.set_size_request(w, h)
+        except (ValueError, AttributeError):
+            log.warning("bad CHRONICLE_SHOT_SIZE %r", size)
 
     def run() -> bool:
         try:
+            if article and hasattr(window, "open_article"):
+                # remember=False opens at the top rather than restoring scroll
+                window.open_article(int(article), remember=False)
             if page in ("reader", "library", "sources"):
                 window.show_page(page)
+            if scroll and page == "library":
+                _scroll_library(window, float(scroll))
             # Let the page settle (WebKit paint, list realisation) before capture.
             GLib.timeout_add(int(delay * 1000 * 0.45), finish)
         except Exception:                             # noqa: BLE001

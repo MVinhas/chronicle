@@ -138,6 +138,34 @@ class TestSanitiser(unittest.TestCase):
         self.assertTrue(htmlutil.make_excerpt(html, 40).endswith("…"))
 
 
+class TestTitles(unittest.TestCase):
+    """Page titles conventionally append the site name; the queue must not."""
+
+    def test_strips_site_name_after_pipe(self):
+        self.assertEqual(
+            htmlutil.clean_title("Five Years of Rust | Rust Blog"),
+            "Five Years of Rust")
+
+    def test_strips_known_suffix(self):
+        self.assertEqual(
+            htmlutil.clean_title("Spaced Repetition \u00b7 Gwern.net", "Gwern.net"),
+            "Spaced Repetition")
+
+    def test_keeps_dashes_that_belong_to_the_title(self):
+        for title in ("A Tale of Two Cities - Chapter One",
+                      "Why We Sleep \u2014 A Review"):
+            self.assertEqual(htmlutil.clean_title(title), title)
+
+    def test_keeps_a_long_trailing_segment(self):
+        title = "On Mathematics | An Unusually Long Trailing Clause That Is Not A Site"
+        self.assertEqual(htmlutil.clean_title(title), title)
+
+    def test_untouched_when_there_is_no_suffix(self):
+        self.assertEqual(
+            htmlutil.clean_title("How out of date are Android devices?"),
+            "How out of date are Android devices?")
+
+
 class TestAssess(unittest.TestCase):
     def test_prose_is_ok(self):
         self.assertEqual(assess("<p>" + ("word " * 40) + "</p>"), "ok")

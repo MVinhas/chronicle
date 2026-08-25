@@ -429,15 +429,38 @@ def page_title(soup: BeautifulSoup) -> str:
     return "Untitled"
 
 
+# Only separators that in practice introduce a site name. Dashes are excluded
+# on purpose: "A Tale of Two Cities - Chapter One" is one title, not two.
+_TITLE_SEP = re.compile(r"\s+[|\u00b7\u2022\u00bb]\s+")
+
+
 def clean_title(title: str, *suffixes: str) -> str:
+    """Strip the site name that page titles conventionally append.
+
+    Almost every CMS renders <title> as "Post title | Site Name". Left alone
+    that suffix repeats on every row of the reading queue, so remove it: first
+    any site name we already know, then a trailing segment short enough to be a
+    site name rather than part of the title.
+    """
     t = re.sub(r"\s+", " ", title or "").strip()
-    for sep in ("·", "|", "–", "—", " - "):
-        for suf in suffixes:
-            pattern = f"{sep} {suf}"
-            if t.endswith(pattern):
-                t = t[: -len(pattern)].strip()
-            if t.startswith(f"{suf} {sep}"):
-                t = t[len(suf) + len(sep) + 1:].strip()
+
+    for suf in suffixes:
+        if not suf:
+            continue
+        for sep in ("|", "\u00b7", "\u2013", "\u2014", "-", "\u2022"):
+            for pattern in (f" {sep} {suf}", f"{suf} {sep} "):
+                if pattern.strip() and t.endswith(pattern):
+                    t = t[: -len(pattern)].strip()
+                elif pattern.strip() and t.startswith(pattern):
+                    t = t[len(pattern):].strip()
+
+    parts = [p.strip() for p in _TITLE_SEP.split(t) if p.strip()]
+    if len(parts) > 1:
+        head, tail = " | ".join(parts[:-1]), parts[-1]
+        # A trailing segment of a few short words is a site name, not a title.
+        if len(head) >= 8 and len(tail) <= 40 and len(tail.split()) <= 5:
+            t = head
+
     return t or "Untitled"
 
 
