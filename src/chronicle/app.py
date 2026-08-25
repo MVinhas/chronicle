@@ -47,6 +47,7 @@ class ChronicleApp(Adw.Application):
             self.window = MainWindow(self)
         self.window.present()
         capture.arm(self.window)
+        capture.demo(self.window)
 
     def _present_busy(self):
         """Another process holds the library; showing it would show wrong data."""

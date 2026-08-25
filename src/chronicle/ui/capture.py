@@ -12,6 +12,9 @@ Driven entirely by environment variables so it never affects normal runs:
     CHRONICLE_SHOT_SIZE     WxH to force the window to, e.g. 1280x800
     CHRONICLE_SHOT_ARTICLE  article id to open, from the top, unscrolled
     CHRONICLE_SHOT_SCROLL   0..1 fraction to scroll the library list to
+
+CHRONICLE_DEMO=1 instead walks the window through a short scripted tour, so a
+screen recording shows the real application being used rather than a slideshow.
 """
 from __future__ import annotations
 
@@ -31,7 +34,60 @@ def enabled() -> bool:
     return bool(os.environ.get("CHRONICLE_SHOT"))
 
 
-def _scroll_library(window, fraction: float) -> None:
+def demo(window) -> None:
+    """Walk the window through a short tour, for screen recording.
+
+    Each step is a real action on the real window -- the same handlers the
+    keyboard shortcuts call -- so what gets recorded is the application being
+    used, just without a hand on the keyboard.
+    """
+    if not os.environ.get("CHRONICLE_DEMO"):
+        return
+
+    # Fill the screen so a full-screen recording is all application.
+    if os.environ.get("CHRONICLE_DEMO_MAXIMIZE", "1") != "0":
+        window.maximize()
+
+    reader = window.reader
+    steps = [
+        (2600, lambda: window.show_page("reader")),
+        (3000, lambda: reader.scroll_by_page(1)),
+        (2600, lambda: reader.scroll_by_page(1)),
+        (2200, lambda: window.go_next()),
+        (3000, lambda: reader.scroll_by_page(1)),
+        (2400, lambda: window.go_next()),
+        (2600, lambda: window.show_page("library")),
+        (2600, lambda: _scroll_library(window, 0.28, delay=200)),
+        (2600, lambda: _scroll_library(window, 0.42, delay=200)),
+        (2400, lambda: window.toggle_hide_read()),
+        (2600, lambda: window.show_page("sources")),
+        (2600, lambda: window.cycle_theme()),
+        (2800, lambda: window.show_page("reader")),
+        (3000, lambda: window.cycle_theme()),
+        (2600, lambda: None),
+    ]
+
+    state = {"i": 0}
+
+    def tick() -> bool:
+        i = state["i"]
+        if i >= len(steps):
+            if os.environ.get("CHRONICLE_DEMO_QUIT", "1") != "0":
+                window.get_application().quit()
+            return False
+        wait, action = steps[i]
+        state["i"] = i + 1
+        try:
+            action()
+        except Exception:                             # noqa: BLE001
+            log.exception("demo step %s failed", i)
+        GLib.timeout_add(wait, tick)
+        return False
+
+    GLib.timeout_add(1800, tick)
+
+
+def _scroll_library(window, fraction: float, delay: int = 700) -> None:
     """Scroll the queue so a screenshot can show a representative stretch."""
     try:
         adj = window.library.scroller.get_vadjustment()
@@ -45,7 +101,7 @@ def _scroll_library(window, fraction: float) -> None:
         return False
 
     # The list virtualises, so its extent is only known after a layout pass.
-    GLib.timeout_add(700, apply)
+    GLib.timeout_add(delay, apply)
 
 
 def capture_window(window: Gtk.Window, path: str | Path) -> bool:
