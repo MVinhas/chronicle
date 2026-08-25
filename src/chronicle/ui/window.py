@@ -516,7 +516,7 @@ class MainWindow(Adw.ApplicationWindow):
             application_name="Chronicle",
             application_icon="io.github.mvinhas.Chronicle",
             version="1.0.0",
-            developer_name="Micael Vinhas",
+            developer_name="MVinhas",
             comments=("A personal chronological library of the blogs you love.\n\n"
                       f"{s['articles']:,} articles archived, spanning "
                       f"{(s['oldest'] or '')[:4]} to {(s['newest'] or '')[:4]}."
