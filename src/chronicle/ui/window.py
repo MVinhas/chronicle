@@ -570,7 +570,7 @@ class MainWindow(Adw.ApplicationWindow):
         about = Adw.AboutDialog(
             application_name="Chronicle",
             application_icon="io.github.mvinhas.Chronicle",
-            version="1.0.0",
+            version="1.0.1",
             developer_name="MVinhas",
             comments=("A personal chronological library of the blogs you love.\n\n"
                       f"{s['articles']:,} articles archived, spanning "

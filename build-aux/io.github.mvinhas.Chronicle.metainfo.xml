@@ -46,15 +46,15 @@
 
   <screenshots>
     <screenshot type="default">
-      <image>https://raw.githubusercontent.com/MVinhas/chronicle/v1.0.0/data/screenshots/reader.png</image>
+      <image>https://raw.githubusercontent.com/MVinhas/chronicle/v1.0.1/data/screenshots/reader.png</image>
       <caption>Reading an article on a typographic reading surface</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/MVinhas/chronicle/v1.0.0/data/screenshots/library.png</image>
+      <image>https://raw.githubusercontent.com/MVinhas/chronicle/v1.0.1/data/screenshots/library.png</image>
       <caption>The reading queue, oldest first, mixing every blog you follow</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/MVinhas/chronicle/v1.0.0/data/screenshots/blogs.png</image>
+      <image>https://raw.githubusercontent.com/MVinhas/chronicle/v1.0.1/data/screenshots/blogs.png</image>
       <caption>Managing the blogs you follow and building their archives</caption>
     </screenshot>
   </screenshots>
@@ -99,6 +99,15 @@
   </recommends>
 
   <releases>
+    <release version="1.0.1" date="2026-08-25">
+      <description>
+        <ul>
+          <li>Single-key shortcuts no longer fire while typing in the search field.</li>
+          <li>Opening the library no longer moves focus into the search field.</li>
+          <li>Adding a blog by a URL with a path now follows only that section of the site, including its pagination.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-08-25">
       <description>
         <p>First release.</p>
