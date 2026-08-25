@@ -167,6 +167,19 @@ class Source:
 
     # -- helpers -----------------------------------------------------------
 
+    @property
+    def path_prefix(self) -> str:
+        return (self.config.get("path_prefix") or "").rstrip("/")
+
+    def in_scope(self, url: str) -> bool:
+        """Is this article inside the section the user asked to follow?"""
+        prefix = self.path_prefix
+        if not prefix:
+            return True
+        from urllib.parse import urlparse
+        path = urlparse(url or "").path.rstrip("/")
+        return path == prefix or path.startswith(prefix + "/")
+
     @staticmethod
     def guid_for(url: str) -> str:
         return net.canonical_url(url)

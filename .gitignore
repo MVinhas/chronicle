@@ -8,6 +8,7 @@ CLAUDE.md
 *.db-shm
 *.db-wal
 devlib/
+FLATHUB-PR.md
 .flatpak-build/
 .flatpak-builder/
 # Local build/runtime artefacts

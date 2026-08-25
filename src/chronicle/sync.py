@@ -118,6 +118,10 @@ class Syncer:
             for stub in source.discover(ctx):
                 if self.should_stop():
                     break
+                # Enforced here as well as in the adapter, so a source scoped
+                # to one section can never quietly pull in the whole site.
+                if not source.in_scope(stub.url):
+                    continue
                 discovered += 1
                 prog.discovered += 1
                 article_id, created = self._record(conn, row["id"], stub)

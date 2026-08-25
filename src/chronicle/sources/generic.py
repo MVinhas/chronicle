@@ -36,7 +36,7 @@ class GenericSource(Source):
 
     def discover(self, ctx: Context):
         strategy = self.config.get("strategy") or "auto"
-        if strategy in ("auto", "sitemap"):
+        if strategy in ("auto", "sitemap") and not self.path_prefix:
             got = yield from self._try_sitemap(ctx)
             if got:
                 return
@@ -44,9 +44,17 @@ class GenericSource(Source):
             got = yield from self._try_archive_pages(ctx)
             if got:
                 return
+        if self.path_prefix:
+            ctx.say(f"{self.name}: nothing found under {self.path_prefix}/")
+            return
         yield from self._from_feed(ctx)
 
     # -- archive pages -----------------------------------------------------
+
+    def _index_paths(self) -> tuple[str, ...]:
+        """Where to look for a list of everything, most specific first."""
+        configured = self.config.get("index")
+        return (configured,) + _ARCHIVE_PATHS if configured else _ARCHIVE_PATHS
 
     def _try_archive_pages(self, ctx: Context):
         """Crawl the blog's own index of everything it has published.
@@ -60,10 +68,11 @@ class GenericSource(Source):
         base = (self.homepage or "").rstrip("/")
         links: dict[str, int] = {}
 
-        for path in _ARCHIVE_PATHS:
+        for path in self._index_paths():
             ctx.check()
             found = self._links_from(base + path, base, ctx)
-            if len(found) < 5:
+            found = [u for u in found if self.in_scope(u)]
+            if len(found) < 3:
                 continue
             ctx.say(f"{self.name}: reading the archive at {path}")
             for url in found:
@@ -74,7 +83,7 @@ class GenericSource(Source):
                 ctx.check()
                 more = self._links_from(f"{base}{path.rstrip('/')}/page/{page}/",
                                         base, ctx)
-                fresh = [u for u in more if u not in links]
+                fresh = [u for u in more if u not in links and self.in_scope(u)]
                 if not fresh:
                     break
                 for url in fresh:
@@ -141,7 +150,8 @@ class GenericSource(Source):
         if not urls:
             return False
 
-        urls = [u for u in urls if not _SKIP_PATH.search(urlparse(u).path or "")]
+        urls = [u for u in urls if not _SKIP_PATH.search(urlparse(u).path or "")
+                and self.in_scope(u)]
         ctx.say(f"{self.name}: {len(urls)} pages in sitemap")
         count = 0
         for i, url in enumerate(urls):

@@ -180,6 +180,31 @@ class TestAssess(unittest.TestCase):
         self.assertEqual(assess("<p>  </p>"), "empty")
 
 
+class TestScope(unittest.TestCase):
+    """A URL with a path means one section of a site, not the whole thing."""
+
+    def _source(self, prefix):
+        from chronicle.sources.generic import GenericSource
+        row = {"id": 1, "name": "T", "homepage": "https://example.com"}
+        return GenericSource(row, {"path_prefix": prefix} if prefix else {})
+
+    def test_no_prefix_accepts_everything(self):
+        src = self._source(None)
+        self.assertTrue(src.in_scope("https://example.com/anything"))
+
+    def test_prefix_limits_to_the_section(self):
+        src = self._source("/c/cases")
+        self.assertTrue(src.in_scope("https://example.com/c/cases/a-case"))
+        self.assertTrue(src.in_scope("https://example.com/c/cases/"))
+        self.assertFalse(src.in_scope("https://example.com/c/concepts/x"))
+        self.assertFalse(src.in_scope("https://example.com/some-post"))
+
+    def test_prefix_does_not_match_a_longer_sibling(self):
+        src = self._source("/blog")
+        self.assertFalse(src.in_scope("https://example.com/blogroll/x"))
+        self.assertTrue(src.in_scope("https://example.com/blog/x"))
+
+
 class TestQueue(unittest.TestCase):
     """Ordering, de-duplication and date-confidence rules in the store."""
 

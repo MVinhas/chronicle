@@ -186,33 +186,74 @@ class MainWindow(Adw.ApplicationWindow):
     # -- actions -----------------------------------------------------------
 
     def _install_actions(self) -> None:
+        # Accelerators that need no modifier are suspended while a text field
+        # has focus -- otherwise typing "n" in the search box jumps to the next
+        # article instead of entering a letter, because a window accelerator is
+        # matched before the focused widget ever sees the key.
         specs = [
-            ("next", self.go_next, ["<Alt>Right", "n", "j", "Page_Down"]),
-            ("previous", self.go_previous, ["<Alt>Left", "p", "k", "Page_Up"]),
-            ("favourite", self.toggle_favourite, ["f"]),
-            ("toggle-read", self.toggle_read, ["r"]),
-            ("library", lambda *_: self.show_page("library"), ["l", "Escape"]),
-            ("reader", lambda *_: self.show_page("reader"), ["<Control>1"]),
-            ("sources", lambda *_: self.show_page("sources"), ["<Control>2"]),
-            ("search", self.focus_search, ["<Control>f", "slash"]),
-            ("sync", self.start_sync, ["F5", "<Control>r"]),
-            ("open-external", self.open_external, ["<Control>o"]),
-            ("scroll-down", lambda *_: self.reader.scroll_by_page(1), ["space"]),
-            ("scroll-up", lambda *_: self.reader.scroll_by_page(-1), ["<Shift>space"]),
-            ("top", lambda *_: self.reader.scroll_home(), ["Home"]),
-            ("hide-read", self.toggle_hide_read, ["h"]),
-            ("cycle-theme", self.cycle_theme, ["<Control>t"]),
-            ("shortcuts", self.show_shortcuts, ["<Control>question"]),
-            ("about", self.show_about, []),
+            ("next", self.go_next, ["<Alt>Right"], ["n", "j", "Page_Down"]),
+            ("previous", self.go_previous, ["<Alt>Left"], ["p", "k", "Page_Up"]),
+            ("favourite", self.toggle_favourite, [], ["f"]),
+            ("toggle-read", self.toggle_read, [], ["r"]),
+            ("library", lambda *_: self.show_page("library"), [], ["l"]),
+            ("reader", lambda *_: self.show_page("reader"), ["<Control>1"], []),
+            ("sources", lambda *_: self.show_page("sources"), ["<Control>2"], []),
+            ("search", self.focus_search, ["<Control>f"], ["slash"]),
+            ("sync", self.start_sync, ["F5", "<Control>r"], []),
+            ("open-external", self.open_external, ["<Control>o"], []),
+            ("scroll-down", lambda *_: self.reader.scroll_by_page(1), [], ["space"]),
+            ("scroll-up", lambda *_: self.reader.scroll_by_page(-1), [], ["<Shift>space"]),
+            ("top", lambda *_: self.reader.scroll_home(), [], ["Home"]),
+            ("hide-read", self.toggle_hide_read, [], ["h"]),
+            ("cycle-theme", self.cycle_theme, ["<Control>t"], []),
+            ("shortcuts", self.show_shortcuts, ["<Control>question"], []),
+            ("escape", self.on_escape, ["Escape"], []),
+            ("about", self.show_about, [], []),
         ]
         app = self.get_application()
         self._install_theme_action()
-        for name, handler, accels in specs:
+        self._bare_accels: dict[str, list[str]] = {}
+
+        for name, handler, modified, bare in specs:
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", handler)
             self.add_action(action)
-            if accels:
-                app.set_accels_for_action(f"win.{name}", accels)
+            detailed = f"win.{name}"
+            if bare:
+                self._bare_accels[detailed] = bare
+            if modified or bare:
+                app.set_accels_for_action(detailed, modified + bare)
+
+        self.connect("notify::focus-widget", self._on_focus_changed)
+
+    # -- keyboard focus ----------------------------------------------------
+
+    def _is_text_entry(self, widget) -> bool:
+        return isinstance(widget, (Gtk.Editable, Gtk.TextView))
+
+    def _on_focus_changed(self, *_args) -> None:
+        self._set_bare_accels(not self._is_text_entry(self.get_focus()))
+
+    def _set_bare_accels(self, enabled: bool) -> None:
+        app = self.get_application()
+        if app is None:
+            return
+        for detailed, bare in self._bare_accels.items():
+            modified = [a for a in app.get_accels_for_action(detailed)
+                        if a not in bare]
+            app.set_accels_for_action(detailed, modified + (bare if enabled else []))
+
+    def on_escape(self, *_args) -> None:
+        """Leave the search field first; only then leave the page."""
+        focus = self.get_focus()
+        if self._is_text_entry(focus):
+            if hasattr(self, "library") and focus is self.library.search:
+                if self.library.search.get_text():
+                    self.library.search.set_text("")
+                    return
+            self.set_focus(None)
+            return
+        self.show_page("library")
 
     # Follow system / light / dark, remembered between sessions.
     THEMES = ("system", "light", "dark")
@@ -243,6 +284,15 @@ class MainWindow(Adw.ApplicationWindow):
         Adw.StyleManager.get_default().set_color_scheme(
             self._SCHEMES.get(name, Adw.ColorScheme.DEFAULT))
 
+    def cycle_theme(self, *_):
+        """Ctrl+T steps through system -> light -> dark."""
+        current = self._theme_action.get_state().get_string()
+        nxt = self.THEMES[(self.THEMES.index(current) + 1) % len(self.THEMES)]
+        self._theme_action.activate(GLib.Variant("s", nxt))
+        self.toasts.add_toast(Adw.Toast(
+            title={"system": "Following the system theme",
+                   "light": "Light theme", "dark": "Dark theme"}[nxt], timeout=2))
+
     def toggle_hide_read(self, *_):
         """Hide or show articles already read, in the queue and while reading."""
         now = not self.hide_read
@@ -261,15 +311,6 @@ class MainWindow(Adw.ApplicationWindow):
             title="Hiding articles you have read" if now
             else "Showing all articles", timeout=2))
 
-    def cycle_theme(self, *_):
-        """Ctrl+T steps through system -> light -> dark."""
-        current = self._theme_action.get_state().get_string()
-        nxt = self.THEMES[(self.THEMES.index(current) + 1) % len(self.THEMES)]
-        self._theme_action.activate(GLib.Variant("s", nxt))
-        self.toasts.add_toast(Adw.Toast(
-            title={"system": "Following the system theme",
-                   "light": "Light theme", "dark": "Dark theme"}[nxt], timeout=2))
-
     def show_page(self, name: str) -> None:
         self.stack.set_visible_child_name(name)
 
@@ -279,6 +320,20 @@ class MainWindow(Adw.ApplicationWindow):
             self.library.reload()
         elif name == "sources":
             self.sources_view.reload()
+        # Put focus somewhere that is not a text field, or the single-key
+        # shortcuts would be suspended the moment you open the page -- the
+        # search box is the first focusable widget on the library page and
+        # would otherwise claim focus by default.
+        self._focus_page_content(name)
+
+    def _focus_page_content(self, name: str) -> None:
+        target = None
+        if name == "library":
+            target = self.library.listview
+        elif name == "reader":
+            target = self.reader.webview
+        if target is not None:
+            target.grab_focus()
 
     def focus_search(self, *_):
         self.show_page("library")

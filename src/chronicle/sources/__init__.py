@@ -90,9 +90,23 @@ def detect(url: str) -> dict:
                 "homepage": base, "config": {}, "partial": False,
                 "detected": "built-in recipe", "note": recipe["note"]}
 
-    # The bare hostname is the honest fallback. Truncating at the first dot
-    # turns nav.al into "Nav", which is simply wrong.
-    name = _site_title(base) or host.replace("www.", "")
+    # Title comes from the URL as given, so a section index names itself after
+    # the section rather than the site. The bare hostname is the honest
+    # fallback: truncating at the first dot turns nav.al into "Nav", which is
+    # simply wrong.
+    name = _site_title(url) or _site_title(base) or host.replace("www.", "")
+
+    # A path means the user asked for one section, not the whole site. Crawl
+    # that index and follow its pagination; a site-wide API would return
+    # everything else too, and on some sites the section is not in the API at
+    # all.
+    section = parsed.path.rstrip("/")
+    if section and section not in ("", "/"):
+        return {"plugin": "generic", "name": name, "homepage": base,
+                "config": {"strategy": "archive", "index": section + "/",
+                           "path_prefix": section},
+                "partial": False,
+                "detected": f"section index at {section}/, following its pagination"}
 
     # 1. WordPress REST API -- every post, publisher timestamps, full bodies.
     for path in _WP_PATHS:
