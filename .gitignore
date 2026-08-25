@@ -1,5 +1,6 @@
 
 build-aux/.dev-manifest.json
+build-aux/probe.json
 *.db
 *.db-shm
 *.db-wal
@@ -7,6 +8,7 @@ devlib/
 .flatpak-build/
 .flatpak-builder/
 # Local build/runtime artefacts
+.probe-build/
 __pycache__/
 *.py[cod]
 .scratch/
