@@ -13,8 +13,11 @@ Driven entirely by environment variables so it never affects normal runs:
     CHRONICLE_SHOT_ARTICLE  article id to open, from the top, unscrolled
     CHRONICLE_SHOT_SCROLL   0..1 fraction to scroll the library list to
 
-CHRONICLE_DEMO=1 instead walks the window through a short scripted tour, so a
-screen recording shows the real application being used rather than a slideshow.
+CHRONICLE_DEMO=1 instead walks the window through a short scripted tour.
+Setting CHRONICLE_DEMO_FRAMES to a directory records that tour frame by frame,
+straight from the window's own renderer. That is deliberate: a compositor screen
+recording would capture the whole desktop, and everything else on it. This
+captures only the application.
 """
 from __future__ import annotations
 
@@ -44,13 +47,28 @@ def demo(window) -> None:
     if not os.environ.get("CHRONICLE_DEMO"):
         return
 
-    # Fill the screen so a full-screen recording is all application.
-    if os.environ.get("CHRONICLE_DEMO_MAXIMIZE", "1") != "0":
+    if os.environ.get("CHRONICLE_DEMO_MAXIMIZE") == "1":
         window.maximize()
+
+    frames_dir = os.environ.get("CHRONICLE_DEMO_FRAMES")
+    if frames_dir:
+        # Start once the opening article has loaded, so the first frame shows
+        # the masthead rather than a half-painted page.
+        GLib.timeout_add(1500, lambda: _record_frames(
+            window, frames_dir, int(os.environ.get("CHRONICLE_DEMO_FPS", "10")))
+            or False)
+
+    # Open on a chosen article so the opening frame is representative.
+    article = os.environ.get("CHRONICLE_SHOT_ARTICLE")
+    if article and hasattr(window, "open_article"):
+        try:
+            window.open_article(int(article), remember=False)
+        except Exception:                             # noqa: BLE001
+            log.exception("could not open demo article %s", article)
 
     reader = window.reader
     steps = [
-        (2600, lambda: window.show_page("reader")),
+        (2400, lambda: reader.scroll_home()),
         (3000, lambda: reader.scroll_by_page(1)),
         (2600, lambda: reader.scroll_by_page(1)),
         (2200, lambda: window.go_next()),
@@ -85,6 +103,27 @@ def demo(window) -> None:
         return False
 
     GLib.timeout_add(1800, tick)
+
+
+def _record_frames(window, directory: str, fps: int) -> None:
+    """Snapshot the window on a timer, for assembling into a video."""
+    out = Path(directory)
+    out.mkdir(parents=True, exist_ok=True)
+    for stale in out.glob("frame-*.png"):
+        stale.unlink()
+
+    interval = max(20, int(1000 / max(1, fps)))
+    state = {"n": 0}
+
+    def snap() -> bool:
+        try:
+            capture_window(window, out / f"frame-{state['n']:05d}.png")
+        except Exception:                             # noqa: BLE001
+            return True
+        state["n"] += 1
+        return True
+
+    GLib.timeout_add(interval, snap)
 
 
 def _scroll_library(window, fraction: float, delay: int = 700) -> None:

@@ -1,6 +1,7 @@
 
 build-aux/.dev-manifest.json
 build-aux/probe.json
+chronicle-demo.webm
 .claude/
 CLAUDE.md
 *.db
