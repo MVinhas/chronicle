@@ -1,34 +1,20 @@
 """Blog-agnostic source for sites added by the user.
 
-Tries the routes that yield a *complete* archive first (REST API, Ghost API,
-sitemap) and only falls back to the feed — which is usually truncated — last.
-Dates come from whichever signal a page actually provides, each carrying its
-own confidence so unreliable ones stay visibly unreliable.
+Discovery is delegated to the evidence-merging engine in `discovery.py`: every
+cheap route (feed, sitemaps, the site's own archive pages) is enumerated, the
+results are merged into one candidate pool, and only candidates that still
+need something are fetched. Dates come from whichever signal a page actually
+provides, each carrying its own confidence so unreliable ones stay visibly
+unreliable.
 """
 from __future__ import annotations
 
-import json
-import re
 from urllib.parse import urlparse
 
 from .. import dates, htmlutil, net
 from .base import Content, Context, Source, Stub, probe_all
-from . import wayback
-
-_FEED_HINTS = ("/feed", "/feed/", "/rss", "/rss.xml", "/atom.xml", "/index.xml",
-               "/feed.xml", "/blog/feed")
-_SITEMAP_HINTS = ("/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml",
-                  "/sitemap-index.xml", "/sitemap-posts.xml")
-
-# Where blogs conventionally list everything they have published.
-_ARCHIVE_PATHS = ("/archive", "/archives", "/posts", "/all", "/blog",
-                  "/writing", "/essays", "/articles", "/notes", "/")
-_MAX_ARCHIVE_PAGES = 40
-
-_SKIP_PATH = re.compile(
-    r"/(tag|tags|category|categories|author|authors|page|search|feed|about|"
-    r"contact|privacy|terms|archive|archives|index|sitemap|login|subscribe)"
-    r"(/|$)", re.I)
+from . import discovery, wayback
+from .discovery import Candidate, Report, extract_date  # noqa: F401 (re-export)
 
 
 class GenericSource(Source):
@@ -39,221 +25,218 @@ class GenericSource(Source):
                       base_url: str | None = None, extra: dict | None = None) -> Content:
         snapshot = (extra or {}).get("snapshot")
         if snapshot:
+            # The discovery probe already fetched and de-bannered this
+            # snapshot; refetching it would double every request against the
+            # slowest backend there is.
+            if stub_html:
+                return self.clean(stub_html, url, source="wayback")
             try:
                 resp = wayback.fetch_snapshot(url, snapshot)
             except net.FetchError as exc:
                 return Content("", status="error", source=f"wayback:{exc.status}")
             if resp is None:
                 return Content("", status="error", source="wayback:none")
-            html = resp.text()
-            soup = htmlutil.parse(html)
+            soup = htmlutil.parse(resp.text())
             wayback.strip_banner(soup)
             return self.clean(soup.decode(), url, source="wayback")
         return super().fetch_content(ctx, url, stub_html, base_url, extra)
 
+    # -- discovery ---------------------------------------------------------
+
     def discover(self, ctx: Context):
-        strategy = self.config.get("strategy") or "auto"
-        if strategy == "wayback":
+        if (self.config.get("strategy") or "auto") == "wayback":
             yield from self._try_wayback(ctx)
             return
-        if strategy in ("auto", "sitemap") and not self.path_prefix:
-            got = yield from self._try_sitemap(ctx)
-            if got:
-                return
-        if strategy in ("auto", "sitemap", "archive"):
-            got = yield from self._try_archive_pages(ctx)
-            if got:
-                return
-        if not self.path_prefix:
-            got = yield from self._from_feed(ctx)
-            if got:
-                return
 
-        # Every direct route came up empty. The Internet Archive can often
-        # still rebuild the history from here, but a full CDX crawl is slow --
-        # minutes, not seconds -- so it is not worth running automatically
-        # every time a site merely has no metadata Chronicle can read. That is
-        # a deliberate, user-triggered fallback instead: the Blogs view offers
-        # a "try the Internet Archive" action on a source once a sync like
-        # this one has found nothing (see sources_view._on_try_wayback, which
-        # sets strategy=wayback and re-syncs).
-        if self.path_prefix:
-            ctx.say(f"{self.name}: nothing found under {self.path_prefix}/")
-        else:
-            ctx.say(f"{self.name}: no dated posts found directly")
+        base = (self.homepage or "").rstrip("/")
+        report = Report()
 
-    # -- archive pages -----------------------------------------------------
+        # 1. Feed: one or two requests for exact dates and full bodies.
+        feed_items: list[discovery.FeedItem] = []
+        homepage_html = None
+        try:
+            homepage_html = net.fetch_text(base or self.homepage, retries=1)
+        except net.FetchError:
+            pass
+        feed_url = discovery.find_feed_url(base, homepage_html, self.config, ctx)
+        if feed_url:
+            ctx.say(f"{self.name}: reading feed…")
+            feed_items = discovery.read_feed(feed_url, ctx)
+            report.feed_url, report.feed_count = feed_url, len(feed_items)
+        # Remember where the feed lives — or, when the site was reachable,
+        # that there is none — so later syncs skip the search.
+        if ((feed_url or homepage_html)
+                and self.config.get("feed") != (feed_url or "")):
+            ctx.config_updates["feed"] = feed_url or ""
 
-    def _index_paths(self) -> tuple[str, ...]:
-        """Where to look for a list of everything, most specific first."""
-        configured = self.config.get("index")
-        return (configured,) + _ARCHIVE_PATHS if configured else _ARCHIVE_PATHS
+        # 2. Sitemap: the site's own enumeration of everything.
+        sitemap_urls, sitemap_src = discovery.read_sitemaps(base, self.config, ctx)
+        report.sitemap_url, report.sitemap_count = sitemap_src, len(sitemap_urls)
+        if sitemap_urls:
+            ctx.say(f"{self.name}: {len(sitemap_urls)} pages in sitemap")
+        if sitemap_src and sitemap_src != self.config.get("sitemap"):
+            ctx.config_updates["sitemap"] = sitemap_src
 
-    def _try_archive_pages(self, ctx: Context):
-        """Crawl the blog's own index of everything it has published.
+        # 3. Archive pages: crawled when they are the best route available, or
+        #    when another route looks incomplete and needs corroborating.
+        archive_urls: list[str] = []
+        if self._should_crawl_archive(feed_items, sitemap_urls):
+            archive_urls, index = discovery.read_archive(
+                base, self.config, ctx, self.in_scope)
+            report.archive_index, report.archive_count = index, len(archive_urls)
+            if archive_urls:
+                ctx.say(f"{self.name}: {len(archive_urls)} posts listed at {index}")
+            if ((index or homepage_html)
+                    and self.config.get("index") != (index or "")):
+                ctx.config_updates["index"] = index or ""
 
-        Plenty of blogs have no sitemap but do keep an archive page. Following
-        its pagination recovers the whole history where a feed would have given
-        only the newest handful of posts -- and it also covers archive pages
-        whose "load more" button is JavaScript, because the numbered pages it
-        would fetch are usually still served as ordinary URLs.
+        pool = discovery.merge(feed_items, sitemap_urls, archive_urls,
+                               self.in_scope)
+        report.candidates = len(pool)
+        ctx.result_note = report.summary()
+
+        if not pool:
+            # Every direct route came up empty. The Internet Archive can often
+            # still rebuild the history from here, but a full CDX crawl is
+            # minutes of work, so it stays a deliberate, user-triggered
+            # fallback (see sources_view._on_try_wayback).
+            if self.path_prefix:
+                ctx.say(f"{self.name}: nothing found under {self.path_prefix}/")
+            else:
+                ctx.say(f"{self.name}: no articles found directly")
+            return
+
+        # -- yield what is already complete, probe the rest ----------------
+        yielded: set[str] = set()
+        to_probe: list[Candidate] = []
+        for cand in discovery.probe_order(pool):
+            if cand.complete:
+                # A feed item with a date and a body needs no page fetch.
+                yielded.add(cand.guid)
+                yield Stub(guid=cand.guid, url=cand.url, title=cand.title,
+                           date=cand.date, source_order=cand.order,
+                           raw_html=cand.feed_html, base_url=cand.url,
+                           content_source="feed")
+            elif ctx.no_direct(cand.guid) or (ctx.rejected and
+                                              cand.guid in ctx.rejected):
+                # Already archived (or already judged not to be an article):
+                # a re-sync must not pay one request per page it has seen.
+                report.skipped_known += 1
+            else:
+                to_probe.append(cand)
+
+        if report.skipped_known:
+            ctx.say(f"{self.name}: {report.skipped_known} already checked, "
+                    f"{len(to_probe)} to examine")
+
+        for stub in probe_all(ctx, to_probe, lambda c: self._probe(c, ctx),
+                              workers=self.discover_concurrency,
+                              label=f"{self.name}: reading",
+                              total=len(to_probe)):
+            if stub is None or stub.guid in yielded or ctx.settled(stub.guid):
+                continue
+            yielded.add(stub.guid)
+            yield stub
+
+    def _should_crawl_archive(self, feed_items, sitemap_urls) -> bool:
+        """Crawl the site's own archive listing only when it can add something.
+
+        With no sitemap it is the primary enumeration. With one, it is crawled
+        only when the sitemap looks incomplete: too small to be the archive, or
+        missing articles the feed proves exist.
         """
-        base = (self.homepage or "").rstrip("/")
-        links: dict[str, int] = {}
+        if self.config.get("strategy") == "archive" or self.config.get("index"):
+            return True
+        if not sitemap_urls:
+            return True
+        if len(sitemap_urls) < 10:
+            return True
+        in_sitemap = {net.canonical_url(u) for u in sitemap_urls}
+        return any(net.canonical_url(i.link) not in in_sitemap
+                   for i in feed_items)
 
-        for path in self._index_paths():
-            ctx.check()
-            found = self._links_from(base + path, base, ctx)
-            found = [u for u in found if self.in_scope(u)]
-            if len(found) < 3:
-                continue
-            ctx.say(f"{self.name}: reading the archive at {path}")
-            for url in found:
-                links.setdefault(url, len(links))
+    # -- probing -----------------------------------------------------------
 
-            # Follow numbered pagination for as long as it yields new posts.
-            for page in range(2, _MAX_ARCHIVE_PAGES + 1):
-                ctx.check()
-                more = self._links_from(f"{base}{path.rstrip('/')}/page/{page}/",
-                                        base, ctx)
-                fresh = [u for u in more if u not in links and self.in_scope(u)]
-                if not fresh:
-                    break
-                for url in fresh:
-                    links.setdefault(url, len(links))
-                ctx.say(f"{self.name}: archive page {page} — {len(links)} posts")
-            break
+    def _probe(self, cand: Candidate, ctx: Context) -> Stub | None:
+        """Fetch one candidate page and decide whether it is an article.
 
-        if len(links) < 5:
-            return False
-
-        ctx.say(f"{self.name}: {len(links)} posts found in the archive index")
-        count = 0
-        ordered = sorted(links, key=links.get)
-        items = list(enumerate(ordered))
-        for stub in probe_all(ctx, items, lambda item: self._probe(item[1], item[0]),
-                              workers=self.discover_concurrency,
-                              label=f"{self.name}: reading", total=len(items)):
-            if stub is not None:
-                count += 1
-                yield stub
-        return count > 0
-
-    def _links_from(self, page_url: str, base: str, ctx: Context) -> list[str]:
-        """Same-site article links on a page, in document order."""
+        The fetched HTML rides along on the stub, so the content pass never
+        refetches a page discovery already paid for.
+        """
         try:
-            html = net.fetch_text(page_url, timeout=30, retries=1)
+            resp = net.fetch(cand.url)
         except net.FetchError:
-            return []
-        soup = htmlutil.parse(html)
-        host = urlparse(base).netloc.replace("www.", "")
-        out, seen = [], set()
-        for a in soup.find_all("a", href=True):
-            full = net.absolutise(page_url, a["href"]).split("#")[0]
-            p = urlparse(full)
-            if p.netloc.replace("www.", "") != host:
-                continue
-            if _SKIP_PATH.search(p.path or "") or (p.path or "/") == "/":
-                continue
-            if re.search(r"\.(jpg|png|gif|pdf|zip|xml|json|css|js)$", p.path, re.I):
-                continue
-            if full in seen:
-                continue
-            seen.add(full)
-            out.append(full)
-        return out
-
-    # -- sitemap -----------------------------------------------------------
-
-    def _try_sitemap(self, ctx: Context):
-        base = (self.homepage or "").rstrip("/")
-        urls: list[str] = []
-        for hint in ([self.config["sitemap"]] if self.config.get("sitemap")
-                     else _SITEMAP_HINTS):
-            try:
-                xml = net.fetch_text(base + hint if hint.startswith("/") else hint,
-                                     timeout=60, max_bytes=40_000_000)
-            except net.FetchError:
-                continue
-            urls = self._collect_sitemap(xml, base, ctx, depth=0)
-            if urls:
-                break
-        if not urls:
-            return False
-
-        urls = [u for u in urls if not _SKIP_PATH.search(urlparse(u).path or "")
-                and self.in_scope(u)]
-        ctx.say(f"{self.name}: {len(urls)} pages in sitemap")
-        count = 0
-        items = list(enumerate(urls))
-        for stub in probe_all(ctx, items, lambda item: self._probe(item[1], item[0]),
-                              workers=self.discover_concurrency,
-                              label=f"{self.name}: reading", total=len(items)):
-            if stub is not None:
-                count += 1
-                yield stub
-        return count > 0
-
-    def _collect_sitemap(self, xml: str, base: str, ctx: Context, depth: int) -> list[str]:
-        """Follow one level of sitemap index nesting."""
-        locs = [m.strip() for m in re.findall(r"<loc>(.*?)</loc>", xml, re.S)]
-        if "<sitemapindex" in xml and depth < 2:
-            out: list[str] = []
-            for child in locs[:25]:
-                ctx.check()
-                if not re.search(r"post|article|page|blog", child, re.I) and len(locs) > 3:
-                    continue
-                try:
-                    out += self._collect_sitemap(
-                        net.fetch_text(child, timeout=60), base, ctx, depth + 1)
-                except net.FetchError:
-                    continue
-            return out
-        return [u for u in locs if u.startswith("http")
-                and not re.search(r"\.(xml|jpg|png|gif|pdf|webp|svg)$", u, re.I)]
-
-    def _probe(self, url: str, order: int) -> Stub | None:
-        try:
-            resp = net.fetch(url)
-        except net.FetchError:
+            if cand.feed_html or cand.date.known:
+                # The page is gone but the feed vouched for it; keep what the
+                # feed gave rather than dropping a real post.
+                return Stub(guid=cand.guid, url=cand.url,
+                            title=cand.title or "Untitled", date=cand.date,
+                            source_order=cand.order, raw_html=cand.feed_html,
+                            base_url=cand.url,
+                            content_source="feed" if cand.feed_html else "")
             return None
         html = resp.text()
         soup = htmlutil.parse(html)
-        date = extract_date(soup, url)
-        if not date.known:
+
+        page_date = extract_date(soup, resp.url)
+        date = page_date if discovery._rank(page_date) > discovery._rank(cand.date) \
+            else cand.date
+
+        if not date.known and not self._is_article(cand, soup):
+            ctx.reject(cand.guid)
             return None
-        return Stub(guid=net.canonical_url(url), url=url,
-                    title=htmlutil.clean_title(htmlutil.page_title(soup), self.name),
-                    date=date, source_order=order, raw_html=html,
-                    base_url=resp.url, content_source="direct")
+
+        # Redirects resolved: the guid comes from where the page actually
+        # lives, so /post?id=1 and its pretty permalink become one article.
+        guid = net.canonical_url(resp.url)
+        title = cand.title or htmlutil.clean_title(
+            htmlutil.page_title(soup), self.name)
+        return Stub(guid=guid, url=resp.url, title=title, date=date,
+                    source_order=cand.order, raw_html=cand.feed_html or html,
+                    base_url=resp.url,
+                    content_source="feed" if cand.feed_html else "direct")
+
+    def _is_article(self, cand: Candidate, soup) -> bool:
+        """Is an undated page still a post? Structured signals first, then —
+        for pages a feed or archive listing vouched for — the shape of the
+        page itself."""
+        if discovery._looks_like_article(soup):
+            return True
+        if not (cand.evidence & {"feed", "archive"}):
+            return False
+        node = htmlutil.extract_main(soup, [])
+        if node is None:
+            return False
+        if htmlutil._link_density(node) > 0.5:
+            return False   # a listing, not an article
+        return len(node.get_text(" ", strip=True).split()) >= 30
 
     # -- wayback -------------------------------------------------------------
 
     def _try_wayback(self, ctx: Context):
         """Rebuild the archive entirely from the Internet Archive.
 
-        Used when the site itself does not answer at all -- see `is_dead()` in
-        `detect()`. Every URL the CDX index has ever crawled is a candidate;
-        each is probed through its own archived snapshot, since the origin
-        cannot be asked directly for anything, metadata included.
+        Used when the site itself does not answer at all, or when the user
+        asks for it after the direct routes found nothing. Every URL the CDX
+        index has ever crawled is a candidate; each is probed through its own
+        archived snapshot, and the snapshot HTML is kept for the content pass.
         """
         host = urlparse(self.homepage or "").netloc
         ctx.say(f"{self.name}: searching the Internet Archive — this takes "
                 f"a couple of minutes…")
         snapshots = wayback.list_snapshots(host)
-        snapshots = [(u, ts) for u, ts in snapshots if self.in_scope(u)]
-        ctx.say(f"{self.name}: {len(snapshots)} pages found in the archive")
+        snapshots = [(u, ts) for u, ts in snapshots
+                     if self.in_scope(u) and discovery.classify_url(u) == "maybe"
+                     and not ctx.settled(net.canonical_url(u))]
+        ctx.say(f"{self.name}: {len(snapshots)} pages to examine in the archive")
 
-        count = 0
         items = list(enumerate(snapshots))
         for stub in probe_all(ctx, items,
                               lambda item: self._probe_wayback(*item[1], item[0]),
                               workers=self.discover_concurrency,
                               label=f"{self.name}: reading", total=len(items)):
             if stub is not None:
-                count += 1
                 yield stub
-        return count > 0
 
     def _probe_wayback(self, url: str, timestamp: str, order: int) -> Stub | None:
         try:
@@ -262,177 +245,12 @@ class GenericSource(Source):
             return None
         if resp is None:
             return None
-        html = resp.text()
-        soup = htmlutil.parse(html)
+        soup = htmlutil.parse(resp.text())
+        wayback.strip_banner(soup)
         date = extract_date(soup, url)
         if not date.known:
             return None
         return Stub(guid=net.canonical_url(url), url=url,
                     title=htmlutil.clean_title(htmlutil.page_title(soup), self.name),
-                    date=date, source_order=order,
-                    extra={"snapshot": timestamp})
-
-    # -- feed --------------------------------------------------------------
-
-    def _from_feed(self, ctx: Context):
-        feed_url = self.config.get("feed") or self._find_feed(ctx)
-        if not feed_url:
-            ctx.say(f"{self.name}: no feed or sitemap found")
-            return False
-        ctx.say(f"{self.name}: reading feed…")
-        try:
-            xml = net.fetch_text(feed_url, timeout=60)
-        except net.FetchError:
-            return False
-        items = re.findall(r"<(?:item|entry)[ >](.*?)</(?:item|entry)>", xml, re.S)
-        if not items:
-            items = re.findall(r"<(?:item|entry)>(.*?)</(?:item|entry)>", xml, re.S)
-        ctx.say(f"{self.name}: {len(items)} items in feed")
-        count = 0
-        for order, item in enumerate(items):
-            ctx.check()
-            link = _feed_link(item)
-            if not link:
-                continue
-            raw_date = (_tag(item, "pubDate") or _tag(item, "published")
-                        or _tag(item, "updated") or _tag(item, "dc:date") or "")
-            date = dates.parse_rfc822(raw_date, confidence="exact", source="feed:date")
-            if not date.known:
-                date = dates.parse_iso(raw_date, confidence="exact", source="feed:date")
-            if not date.known:
-                date = dates.parse_from_url(link)
-            body = _cdata(_tag(item, "content:encoded") or _tag(item, "content") or "")
-            title = _cdata(_tag(item, "title") or "Untitled")
-            import html as _h
-            count += 1
-            yield Stub(guid=net.canonical_url(link), url=link,
-                       title=_h.unescape(re.sub(r"<[^>]+>", "", title)).strip() or "Untitled",
-                       date=date, source_order=order,
-                       raw_html=body or None, base_url=link,
-                       content_source="feed" if body else "")
-        return count > 0
-
-    def _find_feed(self, ctx: Context) -> str | None:
-        base = (self.homepage or "").rstrip("/")
-        try:
-            html = net.fetch_text(base or self.homepage)
-            soup = htmlutil.parse(html)
-            link = soup.find("link", attrs={"type": re.compile(
-                r"application/(rss|atom)\+xml")})
-            if link and link.get("href"):
-                return net.absolutise(self.homepage, link["href"])
-        except net.FetchError:
-            pass
-        for hint in _FEED_HINTS:
-            candidate = base + hint
-            try:
-                resp = net.fetch(candidate, timeout=20, retries=1)
-                if b"<rss" in resp.body[:2000] or b"<feed" in resp.body[:2000]:
-                    return candidate
-            except net.FetchError:
-                continue
-        return None
-
-
-# --------------------------------------------------------------------------
-# shared date extraction for arbitrary pages
-# --------------------------------------------------------------------------
-
-_JSONLD_KEYS = ("datePublished", "dateCreated", "uploadDate")
-_TIME_HINT = re.compile(r"published|pubdate|entry-date|post-date|dateline|byline", re.I)
-
-
-def extract_date(soup, url: str) -> dates.PubDate:
-    """Best available publication date for a page, most trustworthy first."""
-    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
-        try:
-            data = json.loads(script.string or "{}")
-        except (json.JSONDecodeError, TypeError):
-            continue
-        for obj in _iter_ld(data):
-            for key in _JSONLD_KEYS:
-                if isinstance(obj, dict) and obj.get(key):
-                    d = dates.parse_iso(str(obj[key]), confidence="exact",
-                                        source=f"jsonld:{key}")
-                    if d.known:
-                        return d
-
-    meta = htmlutil.meta_content(
-        soup, "article:published_time", "og:article:published_time",
-        "datePublished", "dc.date.issued", "dcterms.issued",
-        "citation_publication_date", "sailthru.date", "parsely-pub-date",
-        "pubdate", "publishdate", "date")
-    if meta:
-        d = dates.parse_iso(meta, confidence="exact", source="meta:published")
-        if d.known:
-            return d
-
-    for t in soup.find_all("time"):
-        blob = " ".join((t.get("class") or [])) + " " + (t.get("id") or "")
-        dt = t.get("datetime") or t.get("content")
-        if dt and (_TIME_HINT.search(blob) or not blob.strip()):
-            d = dates.parse_iso(dt, confidence="high", source="time:datetime")
-            if d.known:
-                return d
-
-    d = dates.parse_from_url(url)
-    if d.known:
-        return d
-
-    for node in soup.find_all(class_=_TIME_HINT, limit=6):
-        d = dates.parse_freeform(node.get_text(" ", strip=True),
-                                 confidence="medium", source="text:dateline")
-        if d.known:
-            return d
-
-    # Some hand-written pages carry a dateline as plain text near the top --
-    # "March 13, 2019" as its own heading, with no class or id to hint at it
-    # (paulgraham.com's essays and incompleteideas.net's are both like this).
-    # Restricted to the first few headings, and required to actually name a
-    # month, so a section heading that merely contains a bare year ("Lawyers
-    # in 1991") is not mistaken for a dateline -- parse_freeform's bare-year
-    # fallback is far too weak a signal here, unlike in a context that is
-    # already known to be a dateline (e.g. a class-hinted node, above).
-    for node in soup.find_all(("h1", "h2", "h3", "h4"), limit=6):
-        text = node.get_text(" ", strip=True)
-        if len(text) > 40 or not re.search(dates.MONTH_RE, text, re.I):
-            continue
-        d = dates.parse_freeform(text, confidence="medium", source="text:heading")
-        if d.known:
-            return d
-    return dates.UNKNOWN
-
-
-def _iter_ld(data):
-    if isinstance(data, list):
-        for item in data:
-            yield from _iter_ld(item)
-    elif isinstance(data, dict):
-        yield data
-        for key in ("@graph", "mainEntity", "itemListElement"):
-            if key in data:
-                yield from _iter_ld(data[key])
-
-
-def _tag(blob: str, name: str) -> str | None:
-    m = re.search(rf"<{re.escape(name)}[^>]*>(.*?)</{re.escape(name)}>", blob, re.S)
-    return m.group(1).strip() if m else None
-
-
-def _cdata(text: str) -> str:
-    m = re.match(r"\s*<!\[CDATA\[(.*?)\]\]>\s*$", text or "", re.S)
-    return m.group(1) if m else (text or "")
-
-
-def _feed_link(item: str) -> str | None:
-    m = re.search(r'<link[^>]*rel="alternate"[^>]*href="([^"]+)"', item)
-    if m:
-        return m.group(1)
-    m = re.search(r"<link[^>]*>(.*?)</link>", item, re.S)
-    if m and m.group(1).strip().startswith("http"):
-        return m.group(1).strip()
-    m = re.search(r'<link[^>]*href="([^"]+)"', item)
-    if m:
-        return m.group(1)
-    guid = _tag(item, "guid")
-    return guid if guid and guid.startswith("http") else None
+                    date=date, source_order=order, raw_html=soup.decode(),
+                    base_url=url, extra={"snapshot": timestamp})

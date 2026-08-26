@@ -5,9 +5,10 @@ import re
 from urllib.parse import urlparse
 
 from .. import net
-from . import wayback
+from . import discovery, wayback
 from .base import Cancelled, Content, Context, Source, Stub
-from .generic import GenericSource, extract_date, _ARCHIVE_PATHS
+from .discovery import extract_date
+from .generic import GenericSource
 from .ghost import GhostSource
 from .gwern import GwernSource
 from .mmm import MrMoneyMustacheSource
@@ -60,27 +61,22 @@ def recipe_for(host: str) -> dict | None:
 _WP_PATHS = ("/wp-json/wp/v2/posts?per_page=1",
              "/?rest_route=/wp/v2/posts&per_page=1")
 
-# Ordered most complete first. A post-specific sitemap beats a generic index.
-_SITEMAP_PATHS = ("/post-sitemap.xml", "/sitemap-posts.xml",
-                  "/wp-sitemap-posts-post-1.xml", "/sitemap_index.xml",
-                  "/wp-sitemap.xml", "/sitemap.xml", "/sitemap-index.xml")
-
 _GHOST_KEY_RE = re.compile(
     r'(?:key|apiKey)["\']?\s*[:=]\s*["\']([0-9a-f]{26})["\']', re.I)
 
 # Paths that conventionally mean "everything I've published", not a section
 # of the site scoped to that path -- see the path-handling comment in detect().
-_LISTING_PATHS = {p.rstrip("/") for p in _ARCHIVE_PATHS if p not in ("", "/")}
+_LISTING_PATHS = {p.rstrip("/") for p in discovery.ARCHIVE_PATHS
+                  if p not in ("", "/")}
 
 
 def detect(url: str) -> dict:
     """Work out how to ingest a site the user just added.
 
-    Routes are tried most-complete first, and each probe is given real retries.
-    A feed is the last resort rather than an early exit: it usually carries only
-    the newest handful of posts, so silently settling for one would build a
-    stunted archive and look like success. When that is all there is, the result
-    says so via `partial`.
+    An API is preferred when one exists — it enumerates every post with the
+    publisher's own timestamps. Otherwise the generic source takes over and
+    merges every route it can find (feed, sitemaps, archive pages), so
+    detection only needs to record useful hints, not choose a single winner.
     """
     url = url.strip()
     if not re.match(r"^https?://", url):
@@ -108,20 +104,42 @@ def detect(url: str) -> dict:
                 "homepage": base, "config": {}, "partial": False,
                 "detected": "built-in recipe", "note": recipe["note"]}
 
+    # One homepage fetch serves everything below: the site title, the Ghost
+    # key, the feed link, and the is-it-alive check.
+    home_html: str | None = None
+    home_dead = False
+    try:
+        home_html = net.fetch_text(base, timeout=25, retries=2)
+    except net.FetchError as exc:
+        # `status is None` means the request never got a response at all --
+        # DNS failure or connection refused. A 403/404 is a live site being
+        # fussy, not a dead one.
+        home_dead = exc.status is None
+
     # Title comes from the URL as given, so a section index names itself after
     # the section rather than the site. The bare hostname is the honest
     # fallback: truncating at the first dot turns nav.al into "Nav", which is
     # simply wrong.
-    name = _site_title(url) or _site_title(base) or host.replace("www.", "")
+    name = None
+    if parsed.path.rstrip("/"):
+        name = _site_title_from(_fetch_quiet(url))
+    if not name:
+        name = _site_title_from(home_html)
+    name = name or host.replace("www.", "")
 
-    # The site does not answer at all -- not a 403 or a 404, but no response.
-    # There is no API or sitemap to probe on a server that is not there, so
-    # the only route left is whatever the Internet Archive has crawled.
-    if wayback.is_dead(base):
+    # The site does not answer at all. There is no API or sitemap to probe on
+    # a server that is not there, so the only route left is whatever the
+    # Internet Archive has crawled.
+    if home_dead and wayback.is_dead(base):
         return {"plugin": "generic", "name": name, "homepage": base,
                 "config": {"strategy": "wayback"}, "partial": False,
                 "detected": "site unreachable — rebuilding the archive from "
                             "the Internet Archive"}
+
+    config: dict = {}
+    feed_link = _feed_link_from(base, home_html)
+    if feed_link:
+        config["feed"] = feed_link
 
     # A path means the user asked for one section, not the whole site -- unless
     # the path itself is a conventional "everything I've published" listing
@@ -130,15 +148,14 @@ def detect(url: str) -> dict:
     # every post the index actually finds.
     section = parsed.path.rstrip("/")
     if section and section not in ("", "/"):
+        cfg = dict(config, strategy="archive", index=section + "/")
         if section.lower() in _LISTING_PATHS:
             return {"plugin": "generic", "name": name, "homepage": base,
-                    "config": {"strategy": "archive", "index": section + "/"},
-                    "partial": False,
+                    "config": cfg, "partial": False,
                     "detected": f"archive index at {section}/, following its pagination"}
+        cfg["path_prefix"] = section
         return {"plugin": "generic", "name": name, "homepage": base,
-                "config": {"strategy": "archive", "index": section + "/",
-                           "path_prefix": section},
-                "partial": False,
+                "config": cfg, "partial": False,
                 "detected": f"section index at {section}/, following its pagination"}
 
     # 1. WordPress REST API -- every post, publisher timestamps, full bodies.
@@ -158,43 +175,42 @@ def detect(url: str) -> dict:
                                 f"{f' ({total} posts)' if total else ''}"}
 
     # 2. Ghost -- the front end embeds its own public content key.
-    try:
-        html = net.fetch_text(base, timeout=25, retries=2)
-        m = _GHOST_KEY_RE.search(html)
-        if m and ("ghost" in html.lower() or "/ghost/api/" in html):
+    if home_html:
+        m = _GHOST_KEY_RE.search(home_html)
+        if m and ("ghost" in home_html.lower() or "/ghost/api/" in home_html):
             return {"plugin": "ghost", "name": name, "homepage": base,
                     "config": {"content_key": m.group(1)}, "partial": False,
                     "detected": "Ghost Content API"}
-    except net.FetchError:
-        pass
 
-    # 3. A sitemap still enumerates the whole archive.
-    for path in _SITEMAP_PATHS:
-        try:
-            resp = net.fetch(base + path, timeout=20, retries=2)
-        except net.FetchError:
-            continue
-        head = resp.body[:2000]
-        if b"<urlset" in head or b"<sitemapindex" in head:
-            return {"plugin": "generic", "name": name, "homepage": base,
-                    "config": {"strategy": "sitemap", "sitemap": path},
-                    "partial": False, "detected": f"sitemap ({path})"}
+    # 3. No API. The generic source merges every remaining route — sitemap,
+    #    archive pages, feed — so detection just records where a sitemap is
+    #    (robots.txt first, then convention) to save the first sync a probe.
+    sitemap = _find_sitemap(base)
+    if sitemap:
+        config["sitemap"] = sitemap
+        return {"plugin": "generic", "name": name, "homepage": base,
+                "config": config, "partial": False,
+                "detected": f"sitemap ({sitemap}), merged with the blog's "
+                            f"feed and archive pages"}
 
-    # 4. Nothing machine-readable. The generic source will still try the
-    #    blog's own archive index (and its pagination) before falling back to
-    #    a feed, so leave the strategy open rather than pinning it to "feed".
     return {"plugin": "generic", "name": name, "homepage": base,
-            "config": {"strategy": "auto"}, "partial": True,
-            "detected": "no API or sitemap — will crawl the blog's archive, "
-                        "then fall back to its feed"}
+            "config": config, "partial": True,
+            "detected": "no API or sitemap — will merge the blog's archive "
+                        "pages and feed"}
 
 
-def _site_title(base: str) -> str | None:
-    from .. import htmlutil
+def _fetch_quiet(url: str) -> str | None:
     try:
-        soup = htmlutil.parse(net.fetch_text(base, timeout=20, retries=1))
+        return net.fetch_text(url, timeout=20, retries=1)
     except net.FetchError:
         return None
+
+
+def _site_title_from(html: str | None) -> str | None:
+    if not html:
+        return None
+    from .. import htmlutil
+    soup = htmlutil.parse(html)
     for getter in (lambda: htmlutil.meta_content(soup, "og:site_name"),
                    lambda: soup.title.get_text(strip=True) if soup.title else None):
         val = getter()
@@ -202,6 +218,36 @@ def _site_title(base: str) -> str | None:
             val = re.split(r"\s*[|–—·]\s*", val.strip())[0].strip()
             if 2 <= len(val) <= 48:
                 return val
+    return None
+
+
+def _feed_link_from(base: str, html: str | None) -> str | None:
+    if not html:
+        return None
+    from .. import htmlutil
+    soup = htmlutil.parse(html)
+    link = soup.find("link", attrs={"type": re.compile(
+        r"application/(rss|atom)\+xml")})
+    if link and link.get("href"):
+        return net.absolutise(base + "/", link["href"])
+    return None
+
+
+def _find_sitemap(base: str) -> str | None:
+    """Where the site's sitemap lives, if anywhere — existence check only."""
+    hints = discovery.robots_sitemaps(base) + list(discovery.SITEMAP_HINTS)
+    for hint in hints:
+        target = hint if hint.startswith("http") else base + hint
+        try:
+            # use_cache=False: a truncated probe body must never be cached as
+            # if it were the whole sitemap.
+            resp = net.fetch(target, timeout=20, retries=1, max_bytes=4000,
+                             use_cache=False)
+        except net.FetchError:
+            continue
+        head = resp.body[:2000]
+        if b"<urlset" in head or b"<sitemapindex" in head:
+            return hint
     return None
 
 

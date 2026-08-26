@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS articles (
     excerpt           TEXT NOT NULL DEFAULT '',
     word_count        INTEGER NOT NULL DEFAULT 0,
     image_count       INTEGER NOT NULL DEFAULT 0,
-    content_status    TEXT NOT NULL DEFAULT 'pending',  -- pending|ok|partial|paywalled|empty|error
+    content_status    TEXT NOT NULL DEFAULT 'pending',  -- pending|ok|partial|paywalled|empty|error|gone
     content_source    TEXT NOT NULL DEFAULT '',
     content_fetched_at TEXT,
     content_hash      TEXT,
@@ -88,6 +88,18 @@ CREATE TABLE IF NOT EXISTS images (
     fetched_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_images_url ON images (orig_url);
+
+-- Pages discovery fetched and judged not to be articles. Remembered so a
+-- re-sync does not pay one request per non-article page, every time.
+-- `epoch` versions the judgement: when the classifier improves, bumping
+-- REJECT_EPOCH makes old verdicts eligible for re-examination.
+CREATE TABLE IF NOT EXISTS discovery_rejects (
+    source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    guid      TEXT NOT NULL,
+    seen_at   TEXT NOT NULL,
+    epoch     INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (source_id, guid)
+);
 
 CREATE TABLE IF NOT EXISTS app_state (
     key   TEXT PRIMARY KEY,
@@ -356,10 +368,38 @@ def update_content(conn, article_id: int, html: str, *, status: str,
          utcnow(), article_id))
 
 
-def mark_content_error(conn, article_id: int, message: str) -> None:
+def mark_content_error(conn, article_id: int, message: str,
+                       permanent: bool = False) -> None:
+    """Record a failed content fetch.
+
+    `permanent` marks the page as definitively gone at the origin (404/410):
+    it is excluded from routine retries, but a stub arriving with a *new*
+    content route (a feed body, a Wayback snapshot) still gets to try again.
+    """
+    status = "gone" if permanent else "error"
     conn.execute(
-        "UPDATE articles SET content_status='error', content_source=?, content_fetched_at=? "
-        "WHERE id=?", (message[:120], utcnow(), article_id))
+        "UPDATE articles SET content_status=?, content_source=?, content_fetched_at=? "
+        "WHERE id=?", (status, message[:120], utcnow(), article_id))
+
+
+# Bump when the article classifier gets smarter, so pages rejected by an
+# older engine are examined again once instead of being skipped forever.
+REJECT_EPOCH = 1
+
+
+def rejected_guids(conn, source_id: int) -> set[str]:
+    return {r["guid"] for r in conn.execute(
+        "SELECT guid FROM discovery_rejects WHERE source_id=? AND epoch=?",
+        (source_id, REJECT_EPOCH))}
+
+
+def record_rejects(conn, source_id: int, guids) -> None:
+    now = utcnow()
+    conn.executemany(
+        "INSERT INTO discovery_rejects(source_id, guid, seen_at, epoch) "
+        "VALUES(?,?,?,?) ON CONFLICT(source_id, guid) DO UPDATE SET "
+        "seen_at=excluded.seen_at, epoch=excluded.epoch",
+        [(source_id, g, now, REJECT_EPOCH) for g in guids])
 
 
 def pending_content(conn, source_id: int | None = None, limit: int = 100000):

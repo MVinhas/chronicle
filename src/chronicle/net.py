@@ -117,16 +117,23 @@ def is_cancelled() -> bool:
 
 
 def _decompress(body: bytes, encoding: str) -> bytes:
+    """Decompress a response body, tolerating truncation.
+
+    A body cut short by `max_bytes` is a truncated stream; decompressobj
+    yields what it can instead of raising, which is exactly right for
+    existence probes that only need the head of a large compressed file.
+    (gzip.decompress raises EOFError there, which used to escape uncaught.)
+    """
     encoding = (encoding or "").lower()
     try:
         if encoding == "gzip":
-            return gzip.decompress(body)
+            return zlib.decompressobj(wbits=16 + zlib.MAX_WBITS).decompress(body)
         if encoding == "deflate":
             try:
-                return zlib.decompress(body)
+                return zlib.decompressobj().decompress(body)
             except zlib.error:
-                return zlib.decompress(body, -zlib.MAX_WBITS)
-    except (OSError, zlib.error):
+                return zlib.decompressobj(wbits=-zlib.MAX_WBITS).decompress(body)
+    except (OSError, EOFError, zlib.error):
         return body
     return body
 

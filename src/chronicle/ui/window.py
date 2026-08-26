@@ -10,7 +10,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from .. import dates, db, sync  # noqa: E402
+from .. import __version__, dates, db, sync  # noqa: E402
 from .library import LibraryView  # noqa: E402
 from .reader import ReaderView  # noqa: E402
 from .sources_view import SourcesView  # noqa: E402
@@ -570,7 +570,7 @@ class MainWindow(Adw.ApplicationWindow):
         about = Adw.AboutDialog(
             application_name="Chronicle",
             application_icon="io.github.mvinhas.Chronicle",
-            version="1.1.0",
+            version=__version__,
             developer_name="MVinhas",
             comments=("A personal chronological library of the blogs you love.\n\n"
                       f"{s['articles']:,} articles archived, spanning "

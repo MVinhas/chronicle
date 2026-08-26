@@ -99,6 +99,24 @@
   </recommends>
 
   <releases>
+    <release version="1.2.0" date="2026-08-26">
+      <description>
+        <ul>
+          <li>Discovery now merges every route a blog offers — its feed, its sitemaps (including ones named only in robots.txt), and its own archive pages — instead of picking a single one, so each article carries the best evidence from all of them: the sitemap's completeness with the feed's exact dates and full text.</li>
+          <li>Updating an already-built archive is now close to free: pages already archived, and pages already examined and judged not to be articles, are no longer refetched — a re-check of a 500-post blog drops from hundreds of requests to a handful.</li>
+          <li>Posts with no readable publication date are no longer silently dropped: when the feed or the blog's own archive vouches for a page, it is kept and filed under Undated.</li>
+          <li>A post that has vanished from the live site but still appears in the feed is kept, with the feed's copy of its text.</li>
+          <li>Articles whose page has permanently gone (404) stop being retried on every update; they become eligible again only when a new route to them appears, such as the Internet Archive.</li>
+          <li>Sitemap indexes with numbered children (sitemap-1.xml and the like) are now followed instead of being skipped, and clearly non-article children (tag, category, author, image sitemaps) are skipped without being downloaded.</li>
+          <li>Feeds that keep their history behind pagination (WordPress-style ?paged=, Atom rel="next") are now read all the way back.</li>
+          <li>Rebuilding a site from the Internet Archive now fetches each snapshot once instead of twice.</li>
+          <li>Duplicate articles from redirecting URLs are recognised as one article, using the address the page actually lives at.</li>
+          <li>Adding a blog makes roughly half as many requests, and each blog now remembers where its feed and archive index live (or that it has none) so later updates skip the search.</li>
+          <li>Fixed "try the Internet Archive" discarding a blog's section scope and feed hints.</li>
+          <li>Each blog's row now explains, on hover, how its archive is built and what the last update found.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.0" date="2026-08-26">
       <description>
         <ul>

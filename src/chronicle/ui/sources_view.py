@@ -69,10 +69,10 @@ class SourcesView(Gtk.Box):
 
         self.group = Adw.PreferencesGroup(
             title="Blogs you follow",
-            description="Each blog is archived by whichever route recovers its "
-                        "complete history — a REST or content API, a sitemap, a "
-                        "feed, or the Internet Archive. Chronicle picks the "
-                        "route when you add the blog.")
+            description="Each blog is archived from every route it offers — a "
+                        "REST or content API where one exists, otherwise its "
+                        "feed, sitemaps and archive pages combined, or the "
+                        "Internet Archive as a last resort.")
 
         actions = Gtk.Box(spacing=8)
         add = Gtk.Button(icon_name="list-add-symbolic", tooltip_text="Add a blog",
@@ -145,14 +145,23 @@ class SourcesView(Gtk.Box):
             row = Adw.ActionRow(title=src["name"], subtitle="  ·  ".join(bits))
             row.set_subtitle_lines(2)
 
-            # Offered only once the direct routes have actually been tried and
-            # come up empty -- a full Internet Archive crawl is minutes of
-            # work, so it is worth asking for rather than reaching for it on
-            # every partial miss (see GenericSource.discover).
+            # How this archive is built, and what the last update found —
+            # useful detail that would crowd the subtitle.
             try:
                 config = json.loads(src["config"] or "{}")
             except json.JSONDecodeError:
                 config = {}
+            detail = [config.get("detected") or ""]
+            if src["last_sync_message"]:
+                detail.append(f"Last update: {src['last_sync_message']}")
+            detail = "\n".join(d for d in detail if d)
+            if detail:
+                row.set_tooltip_text(detail)
+
+            # Offered only once the direct routes have actually been tried and
+            # come up empty -- a full Internet Archive crawl is minutes of
+            # work, so it is worth asking for rather than reaching for it on
+            # every partial miss (see GenericSource.discover).
             if (src["plugin"] == "generic" and not count
                     and src["last_sync_status"] == "ok"
                     and config.get("strategy") != "wayback"):
@@ -215,7 +224,7 @@ class SourcesView(Gtk.Box):
             self.progress_bar.set_fraction(max(0.0, min(1.0, prog.fraction)))
         eta = prog.eta_seconds
         self.progress_stats.set_label(
-            f"{prog.discovered} found  ·  {prog.new} new  ·  "
+            f"{prog.discovered} checked  ·  {prog.new} new  ·  "
             f"{prog.fetched} retrieved" +
             (f"  ·  {prog.failed} unavailable" if prog.failed else "") +
             (f"  ·  {_format_eta(eta)} left" if eta is not None else ""))
@@ -231,7 +240,16 @@ class SourcesView(Gtk.Box):
         self.emit("sync-requested", [source_id])
 
     def _on_try_wayback(self, _btn, source_id) -> None:
-        db.set_source_config(self.get_conn(), source_id, {"strategy": "wayback"})
+        # Merge, don't replace: the source may carry a section scope or a
+        # feed hint that must survive the strategy switch.
+        conn = self.get_conn()
+        src = db.get_source(conn, source_id)
+        try:
+            config = json.loads(src["config"] or "{}")
+        except json.JSONDecodeError:
+            config = {}
+        config["strategy"] = "wayback"
+        db.set_source_config(conn, source_id, config)
         self.emit("sync-requested", [source_id])
 
     def _on_rename(self, _btn, src) -> None:
@@ -288,11 +306,7 @@ class SourcesView(Gtk.Box):
                  "its archive — a REST API, a sitemap, or a feed.")
         entry = Gtk.Entry(placeholder_text="https://example.com",
                           input_purpose=Gtk.InputPurpose.URL, activates_default=True)
-        status = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label", "caption"])
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        box.append(entry)
-        box.append(status)
-        dialog.set_extra_child(box)
+        dialog.set_extra_child(entry)
         dialog.add_response("cancel", "Cancel")
         dialog.add_response("add", "Add")
         dialog.set_response_appearance("add", Adw.ResponseAppearance.SUGGESTED)
@@ -303,11 +317,11 @@ class SourcesView(Gtk.Box):
             text = entry.get_text().strip()
             dialog.set_response_enabled("add", len(text) > 3)
         entry.connect("changed", on_changed)
-        dialog.connect("response", self._on_add_response, entry, status)
+        dialog.connect("response", self._on_add_response, entry)
         dialog.present(self.window)
         entry.grab_focus()
 
-    def _on_add_response(self, dialog, response, entry, status) -> None:
+    def _on_add_response(self, dialog, response, entry) -> None:
         if response != "add":
             return
         url = entry.get_text().strip()
@@ -325,9 +339,11 @@ class SourcesView(Gtk.Box):
         db.init(conn)
         slug = spec["homepage"].split("//")[-1].split("/")[0] \
             .replace("www.", "").replace(".", "-")
+        config = dict(spec.get("config") or {})
+        config["detected"] = spec["detected"]
         try:
             db.add_source(conn, slug, spec["name"], spec["plugin"],
-                          spec["homepage"], spec.get("config") or {})
+                          spec["homepage"], config)
         except Exception as exc:                      # noqa: BLE001
             GLib.idle_add(self._added, None, str(exc))
             return

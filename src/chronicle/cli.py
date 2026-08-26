@@ -43,8 +43,10 @@ def cmd_add(args) -> int:
     print(f"  plugin  : {spec['plugin']}")
     slug = args.slug or spec["homepage"].split("//")[-1].split("/")[0] \
         .replace("www.", "").replace(".", "-")
+    config = dict(spec.get("config") or {})
+    config["detected"] = spec["detected"]
     sid = db.add_source(conn, slug, spec["name"], spec["plugin"],
-                        spec["homepage"], spec.get("config") or {})
+                        spec["homepage"], config)
     print(f"Added as '{slug}' (id {sid}). Run: chronicle sync --source {slug}")
     return 0
 

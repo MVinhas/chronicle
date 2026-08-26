@@ -2,10 +2,16 @@
 
 ## Writing an adapter
 
-Most blogs need no code: generic detection tries a WordPress REST API, a Ghost
-Content API, a sitemap crawl and finally a feed. An adapter ("recipe") is worth
-writing when a site's *full history* cannot be recovered any other way, or when
-its publication dates need site-specific knowledge to get right.
+Most blogs need no code: detection first looks for an API (WordPress REST,
+Ghost Content), and otherwise the generic engine gathers evidence from *every*
+route the site offers — its feed (with pagination), its sitemaps (found via
+robots.txt or convention), and its own archive pages — merges the results into
+one candidate pool per canonical URL, classifies out the non-articles, and only
+then fetches what still needs fetching (see `sources/discovery.py`). An adapter
+("recipe") is worth writing only when a site's *full history* cannot be
+recovered any other way, or when its publication dates need site-specific
+knowledge to get right. Before writing one, ask whether the generic engine
+could be taught the general pattern instead.
 
 An adapter is one module in `src/chronicle/sources/`. It answers two questions:
 how to enumerate everything the site has ever published, and how to turn one of
@@ -60,8 +66,10 @@ This is the part that matters most, because dates decide reading order.
   lands in the Undated section, which is correct. Guessing puts it in the wrong
   place in someone's reading queue, silently.
 
-`db.upsert_article()` only ever overwrites a date with one of strictly higher
-confidence, so a later, better signal wins and a worse one cannot regress it.
+`db.upsert_article()` treats the source's latest reading as authoritative in
+either direction — a corrected adapter may honestly become *less* certain —
+with one hard rule: an unknown date never overwrites a known one, so a failed
+fetch cannot erase good data.
 
 ## Command line
 
@@ -152,8 +160,13 @@ be checked with a screenshot before it is called done.
 
 `tests/test_core.py` covers the parts that decide reading order and reading
 quality: date parsing, URL canonicalisation, the sanitiser, queue ordering and
-de-duplication. It needs no network. New adapters should come with a test for
-their date extraction — a small fixture of the site's real markup is enough.
+de-duplication. `tests/test_discovery.py` exercises the generic discovery
+engine against synthetic sites (`tests/fakesite.py` fakes the network with
+request counting), proving properties like "overlapping routes merge to one
+article" and "a re-sync makes no per-article requests" rather than testing any
+one real website. Neither needs the network. New adapters should come with a
+test for their date extraction — a small fixture of the site's real markup is
+enough.
 
 ## Style
 

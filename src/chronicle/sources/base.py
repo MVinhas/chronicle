@@ -45,6 +45,22 @@ class Context:
     progress: Callable[[str, float | None], None] = lambda msg, frac=None: None
     should_stop: Callable[[], bool] = lambda: False
     browser_fetch: Callable[[str], str] | None = None   # WebKit-backed fetcher
+    # What the library already holds for this source: guid -> (dated,
+    # content_state) where content_state is "ok", "gone" or "missing".
+    # Lets discovery skip refetching what is already settled.
+    known: dict[str, tuple[bool, str]] | None = None
+    # Guids fetched on an earlier sync and judged not to be articles, plus the
+    # callback for reporting new such judgements. Together they stop a re-sync
+    # paying one request per non-article page, every time.
+    rejected: set[str] | None = None
+    reject: Callable[[str], None] = lambda guid: None
+    # Config hints a source learned during this sync (where the feed lives,
+    # where the archive index is — or that there is none). Persisted by the
+    # Syncer so later syncs skip the search.
+    config_updates: dict = field(default_factory=dict)
+    # A one-line summary the source may leave behind ("sitemap 138, feed 10 —
+    # 142 unique"); recorded as the sync result the user sees.
+    result_note: str = ""
 
     def check(self) -> None:
         if self.should_stop():
@@ -52,6 +68,18 @@ class Context:
 
     def say(self, msg: str, frac: float | None = None) -> None:
         self.progress(msg, frac)
+
+    def settled(self, guid: str) -> bool:
+        """Is this article already archived with both a date and content?"""
+        k = (self.known or {}).get(guid)
+        return bool(k and k[0] and k[1] == "ok")
+
+    def no_direct(self, guid: str) -> bool:
+        """Should a direct page fetch be skipped? True when the article is
+        settled — or dated but permanently gone at the origin, where only a
+        *new* route (a feed body, a Wayback snapshot) is worth trying."""
+        k = (self.known or {}).get(guid)
+        return bool(k and k[0] and k[1] in ("ok", "gone"))
 
 
 class Cancelled(Exception):

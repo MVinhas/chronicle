@@ -122,10 +122,29 @@ class Syncer:
             config = {}
         source = sources.build(row, config)
 
+        # What this source already has, so discovery can skip what is settled
+        # instead of paying one request per already-archived article.
+        def _state(status: str) -> str:
+            if status in ("ok", "partial", "paywalled"):
+                return "ok"
+            return "gone" if status == "gone" else "missing"
+
+        known = {
+            r["guid"]: (r["published_at"] is not None,
+                        _state(r["content_status"]))
+            for r in conn.execute(
+                "SELECT guid, published_at, content_status FROM articles "
+                "WHERE source_id=?", (row["id"],))
+        }
+
+        new_rejects: list[str] = []
         ctx = Context(
             progress=lambda msg, frac=None: self._say(prog, msg, frac),
             should_stop=self.should_stop,
             browser_fetch=self.browser_fetch,
+            known=known,
+            rejected=db.rejected_guids(conn, row["id"]),
+            reject=new_rejects.append,
         )
 
         discovered = 0
@@ -147,7 +166,13 @@ class Syncer:
                     need = conn.execute(
                         "SELECT content_status FROM articles WHERE id=?",
                         (article_id,)).fetchone()
-                    if need and need["content_status"] in ("pending", "error"):
+                    status = need["content_status"] if need else None
+                    # 'gone' means the origin 404s; retry it only when this
+                    # stub brings a new route (a feed body or a snapshot).
+                    retry_gone = (status == "gone"
+                                  and bool(stub.raw_html
+                                           or (stub.extra or {}).get("snapshot")))
+                    if status in ("pending", "error") or retry_gone:
                         pending.append((article_id, stub.url, stub.raw_html,
                                         stub.base_url, stub.extra))
                 if discovered % 25 == 0:
@@ -164,13 +189,29 @@ class Syncer:
             log.error("discover failed for %s: %s", row["slug"], traceback.format_exc())
             self._say(prog, f"{row['name']} failed: {exc}")
             return
+        finally:
+            # Verdicts already reached are valid however discovery ended.
+            if new_rejects:
+                db.record_rejects(conn, row["id"], new_rejects)
+            # Hints the source learned (where the feed and archive index
+            # live) save the next sync the same search.
+            if ctx.config_updates:
+                db.set_source_config(conn, row["id"],
+                                     {**config, **ctx.config_updates})
 
         if fetch_content and not self.should_stop():
+            # Also pick up anything left unfetched by earlier runs — a stub
+            # for it may not have been yielded this time at all.
+            have = {item[0] for item in pending}
+            for r in db.pending_content(conn, row["id"]):
+                if r["id"] not in have:
+                    pending.append((r["id"], r["url"], None, None, {}))
             self._fetch_bodies(conn, source, ctx, row, pending, prog, cache_images)
 
         status = "stopped" if self.should_stop() else "ok"
+        note = f" — {ctx.result_note}" if ctx.result_note else ""
         db.mark_sync(conn, row["id"], status,
-                     f"{discovered} articles, {prog.new} new")
+                     f"{discovered} examined, {prog.new} new{note}")
 
     def _record(self, conn, source_id: int, stub) -> tuple[int, bool]:
         fields = dict(url=stub.url, title=stub.title, author=stub.author,
@@ -181,10 +222,6 @@ class Syncer:
 
     def _fetch_bodies(self, conn, source, ctx, row, pending, prog: Progress,
                       cache_images: bool) -> None:
-        if not pending:
-            # Pick up anything left unfetched by an earlier interrupted run.
-            pending = [(r["id"], r["url"], None, None, {})
-                       for r in db.pending_content(conn, row["id"])]
         total = len(pending)
         if not total:
             return
@@ -242,7 +279,12 @@ class Syncer:
                                   done / max(1, total))
                     if result is not None:
                         if isinstance(result, Exception):
-                            db.mark_content_error(conn, article_id, str(result))
+                            # A page the origin says is definitively gone is
+                            # not worth one request on every future sync.
+                            permanent = (isinstance(result, net.FetchError)
+                                         and result.status in (404, 410, 451))
+                            db.mark_content_error(conn, article_id, str(result),
+                                                  permanent=permanent)
                             prog.failed += 1
                         else:
                             self._store(conn, source, article_id, url, result, prog,
