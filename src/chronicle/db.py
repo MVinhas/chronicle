@@ -266,6 +266,11 @@ def rename_source(conn, source_id: int, name: str) -> None:
         conn.execute("UPDATE sources SET name=? WHERE id=?", (name, source_id))
 
 
+def set_source_config(conn, source_id: int, config: dict) -> None:
+    conn.execute("UPDATE sources SET config=? WHERE id=?",
+                 (json.dumps(config), source_id))
+
+
 def mark_sync(conn, source_id: int, status: str, message: str = "") -> None:
     conn.execute(
         "UPDATE sources SET last_sync_at=?, last_sync_status=?, last_sync_message=? WHERE id=?",

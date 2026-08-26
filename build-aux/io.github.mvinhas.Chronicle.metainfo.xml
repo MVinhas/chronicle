@@ -99,12 +99,19 @@
   </recommends>
 
   <releases>
-    <release version="1.0.2" date="2026-08-26">
+    <release version="1.1.0" date="2026-08-26">
       <description>
         <ul>
           <li>Adding a blog's own archive index (such as a page named /archive/) now recovers its whole history instead of finding nothing, by no longer mistaking that index for a section to scope to.</li>
           <li>Pasting a feed URL directly (including a FeedBurner mirror) now detects the site the feed belongs to, so its full archive is built rather than one truncated feed.</li>
-          <li>A site with no publication dates Chronicle can read, or no longer online at all, now falls back automatically to the Internet Archive to rebuild its history.</li>
+          <li>A site that is no longer online at all now has its history rebuilt from the Internet Archive automatically.</li>
+          <li>A site that answers but has no publication dates Chronicle can read no longer waits on a slow Internet Archive search by default — a new button on that blog offers to rebuild from the Internet Archive instead, once the direct routes have actually come up empty.</li>
+          <li>Reading a blog's full page index (a sitemap or archive listing) is now done several pages at a time instead of one by one, which is much faster for blogs with a large back catalogue.</li>
+          <li>Updating a blog now shows an estimated time remaining once enough progress has been made to judge it.</li>
+          <li>Stopping an update is now near-instant, rather than waiting minutes for pages already in flight — this showed up worst against the Internet Archive, whose pages are slow to answer.</li>
+          <li>Fixed a wrong-date bug where a plain-text heading mentioning an unrelated year (e.g. a subheading like "Lawyers in 1991") could be mistaken for an article's publication date.</li>
+          <li>Fixed a crash retrieving articles whose URL contains non-ASCII characters, such as a post titled with Greek letters.</li>
+          <li>Fixed the reading queue silently resetting to the top while scrolled, which happened whenever a background update finished.</li>
         </ul>
       </description>
     </release>

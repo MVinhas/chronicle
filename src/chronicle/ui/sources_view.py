@@ -13,6 +13,17 @@ from gi.repository import Adw, GLib, GObject, Gtk  # noqa: E402
 from .. import db, sources  # noqa: E402
 
 
+def _format_eta(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return "< 1 min"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"~{minutes} min"
+    hours = minutes // 60
+    return f"~{hours}h {minutes % 60}min"
+
+
 class SourcesView(Gtk.Box):
     __gtype_name__ = "ChronicleSourcesView"
 
@@ -134,6 +145,25 @@ class SourcesView(Gtk.Box):
             row = Adw.ActionRow(title=src["name"], subtitle="  ·  ".join(bits))
             row.set_subtitle_lines(2)
 
+            # Offered only once the direct routes have actually been tried and
+            # come up empty -- a full Internet Archive crawl is minutes of
+            # work, so it is worth asking for rather than reaching for it on
+            # every partial miss (see GenericSource.discover).
+            try:
+                config = json.loads(src["config"] or "{}")
+            except json.JSONDecodeError:
+                config = {}
+            if (src["plugin"] == "generic" and not count
+                    and src["last_sync_status"] == "ok"
+                    and config.get("strategy") != "wayback"):
+                wayback_btn = Gtk.Button(icon_name="folder-download-symbolic",
+                                         valign=Gtk.Align.CENTER, css_classes=["flat"],
+                                         tooltip_text="Nothing found directly — "
+                                                       "try rebuilding from the "
+                                                       "Internet Archive instead")
+                wayback_btn.connect("clicked", self._on_try_wayback, src["id"])
+                row.add_suffix(wayback_btn)
+
             toggle = Gtk.Switch(active=bool(src["enabled"]), valign=Gtk.Align.CENTER,
                                 tooltip_text="Include in the reading queue")
             toggle.connect("state-set", self._on_toggle, src["id"])
@@ -183,10 +213,12 @@ class SourcesView(Gtk.Box):
             self.progress_bar.pulse()
         else:
             self.progress_bar.set_fraction(max(0.0, min(1.0, prog.fraction)))
+        eta = prog.eta_seconds
         self.progress_stats.set_label(
             f"{prog.discovered} found  ·  {prog.new} new  ·  "
             f"{prog.fetched} retrieved" +
-            (f"  ·  {prog.failed} unavailable" if prog.failed else ""))
+            (f"  ·  {prog.failed} unavailable" if prog.failed else "") +
+            (f"  ·  {_format_eta(eta)} left" if eta is not None else ""))
 
     # -- actions -----------------------------------------------------------
 
@@ -196,6 +228,10 @@ class SourcesView(Gtk.Box):
         return False
 
     def _on_sync_one(self, _btn, source_id) -> None:
+        self.emit("sync-requested", [source_id])
+
+    def _on_try_wayback(self, _btn, source_id) -> None:
+        db.set_source_config(self.get_conn(), source_id, {"strategy": "wayback"})
         self.emit("sync-requested", [source_id])
 
     def _on_rename(self, _btn, src) -> None:

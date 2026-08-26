@@ -10,8 +10,9 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 
 from . import db, htmlutil, images, net, sources
@@ -31,6 +32,21 @@ class Progress:
     failed: int = 0
     done: bool = False
     error: str = ""
+    started_at: float = field(default_factory=time.monotonic)
+
+    @property
+    def eta_seconds(self) -> float | None:
+        """Time remaining, estimated from progress made so far.
+
+        Only meaningful once some real fraction of work is behind us --
+        the early part of a sync (listing everything before any of it is
+        probed) reports no fraction at all, and the first sliver of one that
+        does is too noisy an extrapolation to show.
+        """
+        if self.done or self.fraction is None or self.fraction < 0.02:
+            return None
+        elapsed = time.monotonic() - self.started_at
+        return elapsed * (1 - self.fraction) / self.fraction
 
 
 class Syncer:
@@ -191,29 +207,53 @@ class Syncer:
         # Fetching is network-bound and some archives answer slowly, so it runs
         # in parallel. Everything that touches the database stays on this
         # thread: the connection is not shared across threads.
+        #
+        # Only a bounded window of work is submitted ahead of what has been
+        # processed, rather than the whole `pending` list at once. A plain
+        # ThreadPoolExecutor(...).submit() for every item pre-queues the lot,
+        # and shutting the pool down (the `with` block's __exit__) then blocks
+        # until every already-started worker finishes -- futures not yet
+        # started can be cancelled, but ones mid-flight cannot, so stopping a
+        # sync against something slow (the Internet Archive answers in
+        # 10-15s/page) could take minutes even though should_stop() was set
+        # straight away.
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(fetch, item): item for item in pending}
+            items = iter(pending)
+            futures: dict = {}
+
+            def fill():
+                for item in items:
+                    if self.should_stop():
+                        break
+                    futures[pool.submit(fetch, item)] = item
+                    if len(futures) >= workers * 2:
+                        break
+
+            fill()
             try:
-                for future in as_completed(futures):
+                while futures:
+                    done_set, _ = wait(futures, return_when=FIRST_COMPLETED)
+                    future = done_set.pop()
+                    del futures[future]
                     article_id, url, result = future.result()
                     done += 1
                     if done % 5 == 0 or done == total:
                         self._say(prog, f"{row['name']}: article {done} of {total}",
                                   done / max(1, total))
-                    if result is None:
-                        continue
-                    if isinstance(result, Exception):
-                        db.mark_content_error(conn, article_id, str(result))
-                        prog.failed += 1
-                        continue
-                    self._store(conn, source, article_id, url, result, prog,
-                                cache_images)
+                    if result is not None:
+                        if isinstance(result, Exception):
+                            db.mark_content_error(conn, article_id, str(result))
+                            prog.failed += 1
+                        else:
+                            self._store(conn, source, article_id, url, result, prog,
+                                        cache_images)
                     if self.should_stop():
                         break
+                    fill()
             finally:
-                if self.should_stop():
-                    for future in futures:
-                        future.cancel()
+                for future in futures:
+                    future.cancel()
+                pool.shutdown(wait=False, cancel_futures=True)
 
     def _store(self, conn, source, article_id: int, url: str, content,
                prog: Progress, cache_images: bool) -> None:

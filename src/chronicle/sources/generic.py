@@ -12,7 +12,7 @@ import re
 from urllib.parse import urlparse
 
 from .. import dates, htmlutil, net
-from .base import Content, Context, Source, Stub
+from .base import Content, Context, Source, Stub, probe_all
 from . import wayback
 
 _FEED_HINTS = ("/feed", "/feed/", "/rss", "/rss.xml", "/atom.xml", "/index.xml",
@@ -56,32 +56,31 @@ class GenericSource(Source):
         if strategy == "wayback":
             yield from self._try_wayback(ctx)
             return
-        found = False
         if strategy in ("auto", "sitemap") and not self.path_prefix:
             got = yield from self._try_sitemap(ctx)
-            found = found or got
             if got:
                 return
         if strategy in ("auto", "sitemap", "archive"):
             got = yield from self._try_archive_pages(ctx)
-            found = found or got
             if got:
                 return
         if not self.path_prefix:
             got = yield from self._from_feed(ctx)
-            found = found or got
             if got:
                 return
 
-        # Every direct route came up empty -- the page has no metadata Chronicle
-        # can read a date from (a bare Apache index is a common case), the site
-        # blocks scripted access, or the path really has nothing in it. Rather
-        # than reporting an empty archive, see whether the Internet Archive has
-        # crawled dated copies of the same URLs.
-        if not found:
-            ctx.say(f"{self.name}: nothing usable found directly; "
-                    f"trying the Internet Archive…")
-            yield from self._try_wayback(ctx)
+        # Every direct route came up empty. The Internet Archive can often
+        # still rebuild the history from here, but a full CDX crawl is slow --
+        # minutes, not seconds -- so it is not worth running automatically
+        # every time a site merely has no metadata Chronicle can read. That is
+        # a deliberate, user-triggered fallback instead: the Blogs view offers
+        # a "try the Internet Archive" action on a source once a sync like
+        # this one has found nothing (see sources_view._on_try_wayback, which
+        # sets strategy=wayback and re-syncs).
+        if self.path_prefix:
+            ctx.say(f"{self.name}: nothing found under {self.path_prefix}/")
+        else:
+            ctx.say(f"{self.name}: no dated posts found directly")
 
     # -- archive pages -----------------------------------------------------
 
@@ -131,12 +130,10 @@ class GenericSource(Source):
         ctx.say(f"{self.name}: {len(links)} posts found in the archive index")
         count = 0
         ordered = sorted(links, key=links.get)
-        for i, url in enumerate(ordered):
-            ctx.check()
-            if i % 10 == 0:
-                ctx.say(f"{self.name}: reading {i}/{len(ordered)}",
-                        i / max(1, len(ordered)))
-            stub = self._probe(url, i)
+        items = list(enumerate(ordered))
+        for stub in probe_all(ctx, items, lambda item: self._probe(item[1], item[0]),
+                              workers=self.discover_concurrency,
+                              label=f"{self.name}: reading", total=len(items)):
             if stub is not None:
                 count += 1
                 yield stub
@@ -188,11 +185,10 @@ class GenericSource(Source):
                 and self.in_scope(u)]
         ctx.say(f"{self.name}: {len(urls)} pages in sitemap")
         count = 0
-        for i, url in enumerate(urls):
-            ctx.check()
-            if i % 10 == 0:
-                ctx.say(f"{self.name}: reading {i}/{len(urls)}", i / max(1, len(urls)))
-            stub = self._probe(url, i)
+        items = list(enumerate(urls))
+        for stub in probe_all(ctx, items, lambda item: self._probe(item[1], item[0]),
+                              workers=self.discover_concurrency,
+                              label=f"{self.name}: reading", total=len(items)):
             if stub is not None:
                 count += 1
                 yield stub
@@ -249,12 +245,11 @@ class GenericSource(Source):
         ctx.say(f"{self.name}: {len(snapshots)} pages found in the archive")
 
         count = 0
-        for i, (url, timestamp) in enumerate(snapshots):
-            ctx.check()
-            if i % 10 == 0:
-                ctx.say(f"{self.name}: reading {i}/{len(snapshots)}",
-                        i / max(1, len(snapshots)))
-            stub = self._probe_wayback(url, timestamp, i)
+        items = list(enumerate(snapshots))
+        for stub in probe_all(ctx, items,
+                              lambda item: self._probe_wayback(*item[1], item[0]),
+                              workers=self.discover_concurrency,
+                              label=f"{self.name}: reading", total=len(items)):
             if stub is not None:
                 count += 1
                 yield stub
@@ -393,11 +388,14 @@ def extract_date(soup, url: str) -> dates.PubDate:
     # Some hand-written pages carry a dateline as plain text near the top --
     # "March 13, 2019" as its own heading, with no class or id to hint at it
     # (paulgraham.com's essays and incompleteideas.net's are both like this).
-    # Restricted to the first few headings so a date mentioned in the body
-    # later on is not mistaken for the publication date.
+    # Restricted to the first few headings, and required to actually name a
+    # month, so a section heading that merely contains a bare year ("Lawyers
+    # in 1991") is not mistaken for a dateline -- parse_freeform's bare-year
+    # fallback is far too weak a signal here, unlike in a context that is
+    # already known to be a dateline (e.g. a class-hinted node, above).
     for node in soup.find_all(("h1", "h2", "h3", "h4"), limit=6):
         text = node.get_text(" ", strip=True)
-        if len(text) > 40:          # a real heading, not a dateline
+        if len(text) > 40 or not re.search(dates.MONTH_RE, text, re.I):
             continue
         d = dates.parse_freeform(text, confidence="medium", source="text:heading")
         if d.known:

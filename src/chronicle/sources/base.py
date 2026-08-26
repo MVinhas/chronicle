@@ -66,19 +66,51 @@ def probe_all(ctx: "Context", items, fn, *, workers: int = 5,
     Done one at a time that is minutes of waiting before a single article is
     stored, so it is worth overlapping -- while still yielding in order, since
     several adapters depend on the site's own ordering.
+
+    Submits only a bounded window of work ahead of what has been yielded,
+    rather than the whole list at once (as `pool.map` would): `net.fetch()` has
+    no way to abort a request that is already in flight, so the only way to
+    make cancellation responsive is to stop *starting new ones* the moment it
+    is requested, and a large pre-submitted queue defeats that -- `Cancelled`
+    would still have to wait for every future already handed to a worker.
     """
     from concurrent.futures import ThreadPoolExecutor
 
     items = list(items)
     total = total or len(items)
+    workers = max(1, workers)
     done = 0
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        for result in pool.map(fn, items):
-            ctx.check()
-            done += 1
-            if label and (done % 10 == 0 or done == total):
-                ctx.say(f"{label} {done}/{total}", done / max(1, total))
-            yield result
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        pending: dict = {}
+        it = iter(enumerate(items))
+
+        def fill():
+            for idx, item in it:
+                if ctx.should_stop():
+                    break
+                pending[idx] = pool.submit(fn, item)
+                if len(pending) >= workers * 2:
+                    break
+
+        fill()
+        next_idx = 0
+        try:
+            while pending:
+                ctx.check()
+                if next_idx not in pending:
+                    fill()
+                future = pending.pop(next_idx)
+                result = future.result()
+                next_idx += 1
+                fill()
+                done += 1
+                if label and (done % 10 == 0 or done == total):
+                    ctx.say(f"{label} {done}/{total}", done / max(1, total))
+                yield result
+        finally:
+            for future in pending.values():
+                future.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
 
 
 def assess(html: str) -> str:

@@ -205,6 +205,21 @@ class LibraryView(Gtk.Box):
         self.stack.set_visible_child_name(
             "list" if self.store.get_n_items() else "empty")
 
+    def refresh_if_at_top(self) -> None:
+        """Pick up newly-synced articles, but never while mid-scroll.
+
+        Called every time a background sync finishes, which can be many times
+        during "Update all" -- a plain reload() wipes the store back to page
+        one and resets scroll position each time, which from the reader's
+        side looks exactly like the list "stopped loading" partway down.
+        Skipping the refresh while scrolled costs nothing: the next visit to
+        the top (or the next explicit reload()) catches up anyway.
+        """
+        if self.scroller.get_vadjustment().get_value() > 0:
+            self._update_summary()
+            return
+        self.reload()
+
     def _load_page(self) -> None:
         if self._exhausted:
             return

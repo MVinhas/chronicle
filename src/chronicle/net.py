@@ -170,6 +170,25 @@ def _write_cache(url: str, headers: dict, body: bytes) -> None:
             log.debug("cache write failed for %s: %s", url, exc)
 
 
+def _ascii_safe(url: str) -> str:
+    """Percent-encode a URL so it survives http.client's ASCII-only request line.
+
+    A real page can link to a non-ASCII path (ribbonfarm.com has posts titled
+    with Greek letters), and BeautifulSoup/urljoin happily hand that straight
+    back as a Unicode `href`. `http.client` does not: it encodes the request
+    line as ASCII and raises otherwise. `safe="/%:@"` leaves already-percent-
+    encoded and structural characters alone so a normal URL round-trips as-is.
+    """
+    try:
+        url.encode("ascii")
+        return url
+    except UnicodeEncodeError:
+        p = urllib.parse.urlsplit(url)
+        path = urllib.parse.quote(p.path, safe="/%")
+        query = urllib.parse.quote(p.query, safe="=&%")
+        return urllib.parse.urlunsplit((p.scheme, p.netloc, path, query, p.fragment))
+
+
 def fetch(url: str, *, headers: dict | None = None, timeout: float = 45.0,
           retries: int = 3, use_cache: bool = True, max_bytes: int = 25_000_000,
           method: str = "GET", data: bytes | None = None) -> Response:
@@ -177,6 +196,7 @@ def fetch(url: str, *, headers: dict | None = None, timeout: float = 45.0,
     if _cancelled.is_set():
         raise FetchError(url, None, "cancelled")
 
+    url = _ascii_safe(url)
     host = urllib.parse.urlparse(url).netloc
     req_headers = dict(DEFAULT_HEADERS)
     if headers:

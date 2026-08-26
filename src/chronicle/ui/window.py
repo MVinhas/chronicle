@@ -539,7 +539,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def refresh_library(self) -> None:
         if hasattr(self, "library"):
-            self.library.reload()
+            self.library.refresh_if_at_top()
         if self.current is not None:
             self._update_reader_chrome(self.current)
 
@@ -570,7 +570,7 @@ class MainWindow(Adw.ApplicationWindow):
         about = Adw.AboutDialog(
             application_name="Chronicle",
             application_icon="io.github.mvinhas.Chronicle",
-            version="1.0.2",
+            version="1.1.0",
             developer_name="MVinhas",
             comments=("A personal chronological library of the blogs you love.\n\n"
                       f"{s['articles']:,} articles archived, spanning "
