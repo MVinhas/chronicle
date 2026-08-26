@@ -99,6 +99,15 @@
   </recommends>
 
   <releases>
+    <release version="1.0.2" date="2026-08-26">
+      <description>
+        <ul>
+          <li>Adding a blog's own archive index (such as a page named /archive/) now recovers its whole history instead of finding nothing, by no longer mistaking that index for a section to scope to.</li>
+          <li>Pasting a feed URL directly (including a FeedBurner mirror) now detects the site the feed belongs to, so its full archive is built rather than one truncated feed.</li>
+          <li>A site with no publication dates Chronicle can read, or no longer online at all, now falls back automatically to the Internet Archive to rebuild its history.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.1" date="2026-08-25">
       <description>
         <ul>

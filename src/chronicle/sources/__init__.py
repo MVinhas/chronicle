@@ -5,8 +5,9 @@ import re
 from urllib.parse import urlparse
 
 from .. import net
+from . import wayback
 from .base import Cancelled, Content, Context, Source, Stub
-from .generic import GenericSource, extract_date
+from .generic import GenericSource, extract_date, _ARCHIVE_PATHS
 from .ghost import GhostSource
 from .gwern import GwernSource
 from .mmm import MrMoneyMustacheSource
@@ -67,6 +68,10 @@ _SITEMAP_PATHS = ("/post-sitemap.xml", "/sitemap-posts.xml",
 _GHOST_KEY_RE = re.compile(
     r'(?:key|apiKey)["\']?\s*[:=]\s*["\']([0-9a-f]{26})["\']', re.I)
 
+# Paths that conventionally mean "everything I've published", not a section
+# of the site scoped to that path -- see the path-handling comment in detect().
+_LISTING_PATHS = {p.rstrip("/") for p in _ARCHIVE_PATHS if p not in ("", "/")}
+
 
 def detect(url: str) -> dict:
     """Work out how to ingest a site the user just added.
@@ -80,6 +85,19 @@ def detect(url: str) -> dict:
     url = url.strip()
     if not re.match(r"^https?://", url):
         url = "https://" + url
+
+    # The user may have pasted the feed itself (a FeedBurner mirror, a bare
+    # /feed.xml) rather than the site. Detecting off the feed's own host would
+    # misfire -- a mirror host has no WordPress API or sitemap of its own, and
+    # is not what any recipe is keyed on. Re-run detection against the site
+    # the feed says it belongs to, keeping the feed as a config hint: it is
+    # sometimes the only reachable route into a Cloudflare-blocked origin.
+    home_link = _feed_home_link(url)
+    if home_link and urlparse(home_link).netloc.lower() != urlparse(url).netloc.lower():
+        result = detect(home_link)
+        result.setdefault("config", {}).setdefault("feed", url)
+        return result
+
     parsed = urlparse(url)
     host = parsed.netloc.lower()
     base = f"{parsed.scheme}://{parsed.netloc}"
@@ -96,12 +114,27 @@ def detect(url: str) -> dict:
     # simply wrong.
     name = _site_title(url) or _site_title(base) or host.replace("www.", "")
 
-    # A path means the user asked for one section, not the whole site. Crawl
-    # that index and follow its pagination; a site-wide API would return
-    # everything else too, and on some sites the section is not in the API at
-    # all.
+    # The site does not answer at all -- not a 403 or a 404, but no response.
+    # There is no API or sitemap to probe on a server that is not there, so
+    # the only route left is whatever the Internet Archive has crawled.
+    if wayback.is_dead(base):
+        return {"plugin": "generic", "name": name, "homepage": base,
+                "config": {"strategy": "wayback"}, "partial": False,
+                "detected": "site unreachable — rebuilding the archive from "
+                            "the Internet Archive"}
+
+    # A path means the user asked for one section, not the whole site -- unless
+    # the path itself is a conventional "everything I've published" listing
+    # (ribbonfarm.com/archive/ and the like). Those enumerate posts that live
+    # all over the site, not under that path, so scoping to it would reject
+    # every post the index actually finds.
     section = parsed.path.rstrip("/")
     if section and section not in ("", "/"):
+        if section.lower() in _LISTING_PATHS:
+            return {"plugin": "generic", "name": name, "homepage": base,
+                    "config": {"strategy": "archive", "index": section + "/"},
+                    "partial": False,
+                    "detected": f"archive index at {section}/, following its pagination"}
         return {"plugin": "generic", "name": name, "homepage": base,
                 "config": {"strategy": "archive", "index": section + "/",
                            "path_prefix": section},
@@ -170,6 +203,31 @@ def _site_title(base: str) -> str | None:
             if 2 <= len(val) <= 48:
                 return val
     return None
+
+
+_RSS_LINK_RE = re.compile(r"<link>\s*(https?://[^<\s]+)\s*</link>")
+_ATOM_LINK_RE = re.compile(
+    r'<link[^>]*rel=["\']alternate["\'][^>]*href=["\'](https?://[^"\']+)["\']')
+
+
+def _feed_home_link(url: str) -> str | None:
+    """If `url` is itself a feed, the site homepage it says it belongs to.
+
+    A feed mirror (FeedBurner and the like) or a bare feed path has no
+    WordPress API, sitemap or Ghost key of its own to probe -- those all live
+    on the origin. RSS's `<channel><link>` and Atom's `rel="alternate"` link
+    both name that origin directly.
+    """
+    try:
+        resp = net.fetch(url, timeout=20, retries=1)
+    except net.FetchError:
+        return None
+    head = resp.body[:4000]
+    if b"<rss" not in head and b"<feed" not in head:
+        return None
+    text = resp.text()[:4000]
+    m = _RSS_LINK_RE.search(text) or _ATOM_LINK_RE.search(text)
+    return m.group(1) if m else None
 
 
 __all__ = ["REGISTRY", "RECIPES", "recipe_for", "build", "detect", "Source",

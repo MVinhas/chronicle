@@ -22,15 +22,9 @@ from urllib.parse import urlparse
 
 from .. import dates, htmlutil, net
 from .base import Content, Context, Source, Stub, assess
+from . import wayback
 
 FEEDBURNER = "https://feeds.feedburner.com/mrmoneymustache"
-# One query for the whole domain beats sixteen per-year ones: ~2.5 minutes
-# against ~8, and it returns a usable snapshot id per URL, which removes a
-# second round trip per article when the body is fetched.
-CDX = ("http://web.archive.org/cdx/search/cdx?url={host}&matchType=domain"
-       "&fl=original,timestamp&collapse=urlkey"
-       "&filter=statuscode:200&filter=mimetype:text/html{window}")
-WAYBACK = "https://web.archive.org/web/{ts}id_/{url}"
 
 _PERMALINK_RE = re.compile(r"^/(\d{4})/(\d{2})/(\d{2})/([^/]+)/?$")
 _FIRST_YEAR = 2011
@@ -124,21 +118,13 @@ class MrMoneyMustacheSource(Source):
 
     def _cdx(self, ctx: Context, since_year: int | None = None):
         """Every archived permalink, with the snapshot id to fetch it from."""
-        window = f"&from={since_year}" if since_year else ""
-        url = CDX.format(host=self.host.replace("www.", ""), window=window)
-        try:
-            text = net.fetch_text(url, timeout=300, retries=2,
-                                  max_bytes=80_000_000)
-        except net.FetchError as exc:
-            ctx.say(f"{self.name}: the Internet Archive did not answer ({exc.status})")
+        snapshots = wayback.list_snapshots(self.host, since_year=since_year)
+        if not snapshots:
+            ctx.say(f"{self.name}: the Internet Archive did not answer")
             return
 
         best: dict[str, tuple[str, object, str]] = {}
-        for line in text.splitlines():
-            parts = line.split()
-            if len(parts) < 2:
-                continue
-            raw, timestamp = parts[0], parts[1]
+        for raw, timestamp in snapshots:
             try:
                 path = urlparse(raw).path
             except ValueError:
@@ -201,27 +187,13 @@ class MrMoneyMustacheSource(Source):
     def _from_wayback(self, url: str, snapshot: str | None = None) -> Content:
         # Discovery already recorded a snapshot id, so the availability lookup
         # is only needed for articles carried over from an interrupted run.
-        ts = snapshot or self._best_snapshot(url)
-        if not ts:
-            return Content("", status="error", source="wayback:none")
         try:
-            resp = net.fetch(WAYBACK.format(ts=ts, url=url), timeout=90)
+            resp = wayback.fetch_snapshot(url, snapshot)
         except net.FetchError as exc:
             return Content("", status="error", source=f"wayback:{exc.status}")
-        result = self.clean(resp.text(), url, source="wayback")
-        return result
-
-    @staticmethod
-    def _best_snapshot(url: str) -> str | None:
-        """Prefer an early snapshot: less accumulated site chrome, fewer dead images."""
-        api = ("http://archive.org/wayback/available?url="
-               + url.replace("https://", "").replace("http://", ""))
-        try:
-            data = net.fetch_json(api, timeout=45, retries=2)
-        except Exception:
-            return None
-        snap = (data.get("archived_snapshots") or {}).get("closest") or {}
-        return snap.get("timestamp") if snap.get("available") else None
+        if resp is None:
+            return Content("", status="error", source="wayback:none")
+        return self.clean(resp.text(), url, source="wayback")
 
     def postprocess(self, html: str) -> str:
         soup = htmlutil.parse(html)
@@ -230,9 +202,7 @@ class MrMoneyMustacheSource(Source):
                     ".widget", "#sidebar", ".bns-smf-feeds", ".wm-ipp"):
             for node in soup.select(sel):
                 node.decompose()
-        # Wayback injects its own banner markup into archived pages.
-        for node in soup.select('[id^="wm-"]'):
-            node.decompose()
+        wayback.strip_banner(soup)
         return soup.decode()
 
 
