@@ -46,9 +46,10 @@ class Context:
     should_stop: Callable[[], bool] = lambda: False
     browser_fetch: Callable[[str], str] | None = None   # WebKit-backed fetcher
     # What the library already holds for this source: guid -> (dated,
-    # content_state) where content_state is "ok", "gone" or "missing".
-    # Lets discovery skip refetching what is already settled.
-    known: dict[str, tuple[bool, str]] | None = None
+    # content_state, date_confidence_rank) where content_state is "ok",
+    # "gone" or "missing". Lets discovery skip refetching what is already
+    # settled — and judge whether cheap new evidence improves a stored date.
+    known: dict[str, tuple] | None = None
     # Guids fetched on an earlier sync and judged not to be articles, plus the
     # callback for reporting new such judgements. Together they stop a re-sync
     # paying one request per non-article page, every time.
@@ -77,9 +78,16 @@ class Context:
     def no_direct(self, guid: str) -> bool:
         """Should a direct page fetch be skipped? True when the article is
         settled — or dated but permanently gone at the origin, where only a
-        *new* route (a feed body, a Wayback snapshot) is worth trying."""
+        new route (such as a feed-supplied body) is worth trying."""
         k = (self.known or {}).get(guid)
         return bool(k and k[0] and k[1] in ("ok", "gone"))
+
+    def known_rank(self, guid: str) -> int:
+        """Confidence rank of the stored date for this article; -1 if none."""
+        k = (self.known or {}).get(guid)
+        if not k or not k[0]:
+            return -1
+        return k[2] if len(k) > 2 else 0
 
 
 class Cancelled(Exception):

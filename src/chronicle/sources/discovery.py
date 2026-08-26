@@ -340,37 +340,52 @@ def _collect_sitemap(xml: str, ctx, depth: int) -> list[str]:
         urlparse(u).path or "")]
 
 
-def read_archive(base: str, config: dict, ctx, in_scope) -> tuple[list[str], str | None]:
-    """Article links from the site's own archive/index pages and pagination."""
+def read_archive(base: str, config: dict, ctx, in_scope,
+                 is_known=lambda url: False,
+                 ) -> tuple[list[tuple[str, dates.PubDate]], str | None]:
+    """Article links from the site's own archive/index pages and pagination.
+
+    Each link comes back with whatever date the listing printed next to it —
+    for many hand-built blogs the index is the *only* place dates exist at
+    all. Pagination is incremental: once a whole page's links are already in
+    the library, the older pages cannot contain anything new, so the crawl
+    stops there instead of re-walking the entire history every sync.
+    """
     if config.get("index") == "":
         return [], None   # looked before: this site keeps no archive index
     paths = ((config.get("index"),) if config.get("index") else ()) + ARCHIVE_PATHS
     for path in paths:
         ctx.check()
         links = _links_from(base + path, base)
-        links = [u for u in links if in_scope(u)]
+        links = [(u, h) for u, h in links if in_scope(u)]
         if len(links) < 3:
             continue
-        seen = dict.fromkeys(links)
+        seen: dict[str, str] = {}
+        for u, h in links:
+            seen.setdefault(u, h)
         # Numbered pagination first (also covers JS "load more" buttons whose
-        # numbered pages are still served), then any rel=next chain.
+        # numbered pages are still served), then the ?paged= fallback.
         for page in range(2, MAX_ARCHIVE_PAGES + 1):
             ctx.check()
             more = _links_from(f"{base}{path.rstrip('/')}/page/{page}/", base)
             if not more:
                 more = _links_from(
                     _with_query_param(base + path, "paged", str(page)), base)
-            fresh = [u for u in more if u not in seen and in_scope(u)]
+            more = [(u, h) for u, h in more if in_scope(u)]
+            fresh = [(u, h) for u, h in more if u not in seen]
             if not fresh:
                 break
-            for u in fresh:
-                seen[u] = None
-        return list(seen), path
+            for u, h in fresh:
+                seen.setdefault(u, h)
+            if all(is_known(u) for u, _ in more):
+                break   # everything older is already archived
+        return resolve_listing_dates(list(seen.items())), path
     return [], None
 
 
-def _links_from(page_url: str, base: str) -> list[str]:
-    """Same-site candidate links on a page, in document order."""
+def _links_from(page_url: str, base: str) -> list[tuple[str, str]]:
+    """Same-site candidate links on a page, in document order, each with the
+    listing text printed alongside it (a date, on many archive pages)."""
     try:
         html = net.fetch_text(page_url, timeout=30, retries=1)
     except net.FetchError:
@@ -388,8 +403,113 @@ def _links_from(page_url: str, base: str) -> list[str]:
         if full in seen:
             continue
         seen.add(full)
-        out.append(full)
+        out.append((full, _link_hint(a)))
     return out
+
+
+_HINT_CONTAINERS = ("li", "dd", "td", "p", "article",
+                    "h2", "h3", "h4", "h5", "h6")
+
+
+def _link_hint(a) -> str:
+    """The text a listing prints beside a link — its dateline, very often.
+
+    danluu.com writes `<li><d>08/26</d><a …>`, WordPress archives put a
+    <time> in each card; both reduce to "the text of the link's own list
+    item, minus the link itself". A container shared by several links
+    describes none of them, so it yields nothing.
+    """
+    container = a.find_parent(_HINT_CONTAINERS)
+    if container is None:
+        return ""
+    anchors = container.find_all("a")
+    if len(anchors) != 1:
+        return ""
+    t = container.find("time")
+    if t is not None and t.get("datetime"):
+        return str(t["datetime"])
+    text = container.get_text(" ", strip=True)
+    link_text = a.get_text(" ", strip=True)
+    if link_text:
+        text = text.replace(link_text, " ", 1)
+    return " ".join(text.split())[:120]
+
+
+_NUM_MY_RE = re.compile(r"(\d{1,2})\s*[/.\-]\s*(\d{2}|\d{4})$")
+_NUM_YM_RE = re.compile(r"(\d{4})\s*[/.\-]\s*(\d{1,2})$")
+_BARE_YEAR_RE = re.compile(r"\(?\s*((?:19|20)\d{2})\s*\)?$")
+
+
+def resolve_listing_dates(entries: list[tuple[str, str]],
+                          ) -> list[tuple[str, dates.PubDate]]:
+    """Turn per-link listing text into dates, conservatively.
+
+    Explicit forms (ISO, named months) are taken per entry. Bare numeric
+    forms like danluu.com's "08/26" are ambiguous alone, so they are read as
+    an *ensemble*: an interpretation (month/2-digit-year, month/full-year,
+    year/month) is accepted only when it makes every entry a valid date in a
+    plausible range AND the whole listing comes out in chronological order —
+    which is what an archive index is. Anything unresolved stays unknown.
+    """
+    out: dict[str, dates.PubDate] = {}
+    numeric: list[tuple[str, int, int]] = []   # (url, first, second)
+    for url, hint in entries:
+        hint = (hint or "").strip()
+        if not hint:
+            continue
+        # parse_iso cascades to parse_freeform, so this covers ISO datetimes
+        # and named-month datelines alike. The bare-year fallback is too
+        # eager for arbitrary listing text ("4 min read · issue 2021"), so a
+        # year-only reading is trusted only when the hint IS just a year.
+        d = dates.parse_iso(hint, confidence="medium", source="archive:index")
+        if d.known and d.precision == "year" and not _BARE_YEAR_RE.fullmatch(hint):
+            d = dates.UNKNOWN
+        if d.known:
+            out[url] = d
+            continue
+        m = _NUM_MY_RE.fullmatch(hint) or _NUM_YM_RE.fullmatch(hint)
+        if m:
+            numeric.append((url, int(m.group(1)), int(m.group(2))))
+
+    for url, d in _resolve_numeric_ensemble(numeric).items():
+        out.setdefault(url, d)
+    return [(url, out.get(url, dates.UNKNOWN)) for url, _ in entries]
+
+
+def _resolve_numeric_ensemble(numeric: list[tuple[str, int, int]],
+                              ) -> dict[str, dates.PubDate]:
+    if len(numeric) < 3:
+        return {}
+    from datetime import datetime, timezone
+    this_year = datetime.now(timezone.utc).year
+
+    def expand(two: int) -> int:
+        century = 2000 if two <= (this_year % 100) + 1 else 1900
+        return century + two
+
+    def interpret(a: int, b: int, form: str) -> tuple[int, int] | None:
+        if form == "my":
+            month, year = a, (expand(b) if b < 100 else b)
+        else:
+            year, month = a, b
+        if not (1 <= month <= 12 and 1990 <= year <= this_year + 1):
+            return None
+        return year, month
+
+    for form in ("ym", "my"):
+        pairs = [interpret(a, b, form) for _, a, b in numeric]
+        if any(p is None for p in pairs):
+            continue
+        forward = all(x <= y for x, y in zip(pairs, pairs[1:]))
+        backward = all(x >= y for x, y in zip(pairs, pairs[1:]))
+        if not (forward or backward):
+            continue
+        return {
+            url: dates.PubDate(f"{y:04d}-{m:02d}-01T00:00:00", "month",
+                               "medium", "archive:index")
+            for (url, _, _), (y, m) in zip(numeric, pairs)
+        }
+    return {}
 
 
 # --------------------------------------------------------------------------
@@ -397,7 +517,8 @@ def _links_from(page_url: str, base: str) -> list[str]:
 # --------------------------------------------------------------------------
 
 def merge(feed_items: list[FeedItem], sitemap_urls: list[str],
-          archive_urls: list[str], in_scope) -> dict[str, Candidate]:
+          archive_entries: list[tuple[str, dates.PubDate]],
+          in_scope) -> dict[str, Candidate]:
     """One candidate per canonical URL, holding the union of the evidence."""
     pool: dict[str, Candidate] = {}
     order = 0
@@ -415,11 +536,14 @@ def merge(feed_items: list[FeedItem], sitemap_urls: list[str],
         return cand
 
     # Archive order first: it is the site's own ordering, which several blogs
-    # without dates rely on for tie-breaking.
-    for url in archive_urls:
+    # without dates rely on for tie-breaking — and its listings often carry
+    # the only dates the site publishes at all.
+    for url, listed_date in archive_entries:
         cand = get(url)
         if cand is not None:
             cand.evidence.add("archive")
+            if listed_date.known and _rank(listed_date) > _rank(cand.date):
+                cand.date = listed_date
     for url in sitemap_urls:
         if classify_url(url) != "maybe":
             continue

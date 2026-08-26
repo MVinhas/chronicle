@@ -423,12 +423,13 @@ class TestDetect(unittest.TestCase):
         self.assertEqual(spec["config"].get("feed"), f"{BASE}/rss/")
         self.assertTrue(spec["partial"])
 
-    def test_dead_site_goes_to_wayback(self):
+    def test_dead_site_is_refused(self):
+        from chronicle.sources import DetectError
         fn = FakeNet()   # nothing served, and the origin never answers
         fn.dead = True
         with fn.patched():
-            spec = detect(BASE)
-        self.assertEqual(spec["config"].get("strategy"), "wayback")
+            with self.assertRaises(DetectError):
+                detect(BASE)
 
     def test_section_url_scopes_to_section(self):
         fn = FakeNet()
@@ -456,27 +457,131 @@ class TestClassify(unittest.TestCase):
         self.assertEqual(discovery.classify_url(f"{BASE}/tag/2020/05/"), "skip")
 
 
-class TestWaybackStrategy(SyncHarness):
-    def test_snapshots_fetched_once_not_twice(self):
-        fn = FakeNet()
-        cdx = ("http://web.archive.org/cdx/search/cdx?url=blog.example"
-               "&matchType=domain&fl=original,timestamp&collapse=urlkey"
-               "&filter=statuscode:200&filter=mimetype:text/html")
-        fn.add(cdx, f"{BASE}/2016/04/old-one/ 20200101000000\n"
-                    f"{BASE}/2016/05/old-two/ 20200101000000\n")
-        for slug, ts in (("2016/04/old-one", "20200101000000"),
-                         ("2016/05/old-two", "20200101000000")):
-            fn.add(f"https://web.archive.org/web/{ts}id_/{BASE}/{slug}/",
-                   post_html(slug, f"{slug[:4]}-{slug[5:7]}-01T00:00:00+00:00"))
+def _wp_api(fn: FakeNet, posts: list[dict]) -> None:
+    """Serve a WordPress-like REST API for `posts` ({link,title,date,html})."""
+    import json as _json
+    fn.add(f"{BASE}/wp-json/wp/v2/posts?per_page=1", '[{"id": 1}]',
+           headers={"x-wp-total": str(len(posts))})
+    body = _json.dumps([
+        {"id": i, "link": p["link"], "status": "publish",
+         "date_gmt": p["date"], "title": {"rendered": p["title"]},
+         "content": {"rendered": p.get("html", f"<p>{p['title']} body text "
+                                               "that is long enough to keep. "
+                                               * 5 + "</p>")}}
+        for i, p in enumerate(posts)])
+    from chronicle.sources.wordpress import FIELDS, PAGE_SIZE
+    fn.add(f"{BASE}/wp-json/wp/v2/posts?per_page={PAGE_SIZE}&page=1"
+           f"&orderby=date&order=asc&_fields={FIELDS}", body,
+           headers={"x-wp-total": str(len(posts))})
 
-        spec = {"name": "W", "plugin": "generic", "homepage": BASE,
+
+class TestRouteHealing(SyncHarness):
+    def test_legacy_wayback_source_is_redetected(self):
+        """A source stuck on the retired Internet Archive strategy gets
+        re-detected on sync — fs.blog was live with a working WP API."""
+        fn = FakeNet()
+        fn.add(BASE + "/", "<html><title>Healed</title></html>")
+        _wp_api(fn, [{"link": f"{BASE}/first/", "title": "First",
+                      "date": "2019-03-03T08:00:00"},
+                     {"link": f"{BASE}/second/", "title": "Second",
+                      "date": "2020-04-04T08:00:00"}])
+
+        spec = {"name": "H", "plugin": "generic", "homepage": BASE,
                 "config": {"strategy": "wayback"}}
         run_sync(fn, self.dbfile, spec=spec)
+
+        c = self.conn()
+        src = c.execute("SELECT plugin, config FROM sources").fetchone()
+        c.close()
+        self.assertEqual(src["plugin"], "wordpress")
+        self.assertNotIn("wayback", src["config"])
         rows = self.urls()
         self.assertEqual(len(rows), 2)
         self.assertTrue(all(r["content_status"] == "ok" for r in rows))
-        # One request per snapshot: the probe HTML is reused for content.
-        self.assertEqual(fn.count("web.archive.org/web/"), 2)
+
+    def test_redetect_of_dead_site_fails_cleanly(self):
+        fn = FakeNet()
+        fn.dead = True
+        spec = {"name": "D", "plugin": "generic", "homepage": BASE,
+                "config": {"strategy": "wayback"}}
+        prog = run_sync(fn, self.dbfile, spec=spec)
+        self.assertEqual(prog.error, "")   # the sync run itself survives
+        c = self.conn()
+        src = c.execute("SELECT last_sync_status FROM sources").fetchone()
+        c.close()
+        self.assertEqual(src["last_sync_status"], "error")
+
+
+class TestListingDates(SyncHarness):
+    """Dates printed beside links in an archive index (danluu.com's <d> tags)."""
+
+    def _danluu_site(self, fn: FakeNet):
+        items = []
+        for i, my in enumerate(("08/26", "07/26", "03/25", "11/24", "02/24")):
+            u = f"{BASE}/essay-{i}/"
+            fn.add(u, post_html(f"Essay {i}", None, og_type=None, paragraphs=4))
+            items.append(f"<li><d>{my}</d><a href={u}>Essay {i}</a></li>")
+        fn.add(BASE + "/", "<html><title>Minimal</title><body><ul>"
+               "<li><d>xx/xx</d><a href=#pt>Patreon posts</a></li>"
+               + "".join(items) + "</ul></body></html>")
+
+    def test_mm_yy_listing_dates_apply(self):
+        fn = FakeNet()
+        self._danluu_site(fn)
+        run_sync(fn, self.dbfile, spec={"name": "M", "plugin": "generic",
+                                        "homepage": BASE, "config": {}})
+        rows = self.urls()
+        self.assertEqual(len(rows), 5)
+        dated = {r["url"]: r["published_at"] for r in rows}
+        self.assertEqual(dated[f"{BASE}/essay-0/"], "2026-08-01T00:00:00")
+        self.assertEqual(dated[f"{BASE}/essay-4/"], "2024-02-01T00:00:00")
+        c = self.conn()
+        conf = c.execute("SELECT DISTINCT date_confidence, date_precision, "
+                         "date_source FROM articles").fetchone()
+        c.close()
+        self.assertEqual(tuple(conf), ("medium", "month", "archive:index"))
+
+    def test_listing_date_heals_wrong_stored_date(self):
+        """An already-archived article with a wrong date gets corrected from
+        the listing without a single page fetch."""
+        fn = FakeNet()
+        self._danluu_site(fn)
+        spec = {"name": "M", "plugin": "generic", "homepage": BASE, "config": {}}
+        conn = _REAL_CONNECT(self.dbfile)
+        db.init(conn)
+        sid = db.add_source(conn, "t", "M", "generic", BASE)
+        guid = net.canonical_url(f"{BASE}/essay-0/")
+        aid, _ = db.upsert_article(
+            conn, sid, guid, url=f"{BASE}/essay-0/", title="Essay 0",
+            published_at="1991-01-01T00:00:00", date_precision="year",
+            date_confidence="medium", date_source="text:heading")
+        conn.execute("UPDATE articles SET content_status='ok', "
+                     "content_html='<p>x</p>' WHERE id=?", (aid,))
+        conn.close()
+
+        run_sync(fn, self.dbfile, spec=spec)
+        c = self.conn()
+        row = c.execute("SELECT published_at, date_source FROM articles "
+                        "WHERE guid=?", (guid,)).fetchone()
+        c.close()
+        self.assertEqual(row["published_at"], "2026-08-01T00:00:00")
+        self.assertEqual(row["date_source"], "archive:index")
+        self.assertEqual(fn.count("/essay-0/"), 0)   # zero-request healing
+
+    def test_ambiguous_numbers_without_order_stay_unknown(self):
+        entries = [(f"u{i}", h) for i, h in
+                   enumerate(("3/4", "9/2", "1/8", "5/5"))]
+        resolved = discovery.resolve_listing_dates(entries)
+        self.assertTrue(all(not d.known for _, d in resolved))
+
+    def test_named_month_and_iso_hints(self):
+        entries = [("a", "May 5, 2020 · 4 min"), ("b", "2019-03-07"),
+                   ("c", "12 comments"), ("d", "(2018)")]
+        resolved = dict(discovery.resolve_listing_dates(entries))
+        self.assertEqual(resolved["a"].iso, "2020-05-05T00:00:00")
+        self.assertEqual(resolved["b"].iso, "2019-03-07T00:00:00")
+        self.assertFalse(resolved["c"].known)
+        self.assertEqual(resolved["d"].precision, "year")
 
 
 class TestExtractDate(unittest.TestCase):
@@ -527,8 +632,8 @@ class TestExtractDate(unittest.TestCase):
 
 class TestContextHelpers(unittest.TestCase):
     def test_settled(self):
-        ctx = Context(known={"a": (True, "ok"), "b": (True, "missing"),
-                             "c": (False, "ok"), "d": (True, "gone")})
+        ctx = Context(known={"a": (True, "ok", 4), "b": (True, "missing", 2),
+                             "c": (False, "ok", 0), "d": (True, "gone", 3)})
         self.assertTrue(ctx.settled("a"))
         self.assertFalse(ctx.settled("b"))
         self.assertFalse(ctx.settled("c"))
@@ -539,6 +644,9 @@ class TestContextHelpers(unittest.TestCase):
         self.assertTrue(ctx.no_direct("a"))
         self.assertTrue(ctx.no_direct("d"))
         self.assertFalse(ctx.no_direct("b"))
+        self.assertEqual(ctx.known_rank("a"), 4)
+        self.assertEqual(ctx.known_rank("c"), -1)   # undated
+        self.assertEqual(ctx.known_rank("missing"), -1)
 
 
 if __name__ == "__main__":

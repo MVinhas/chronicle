@@ -101,9 +101,14 @@ class LibraryView(Gtk.Box):
         self.listview.add_css_class("navigation-sidebar")
         self.listview.connect("activate", self._on_activate)
 
+        # The ListView must be the ScrolledWindow's direct child. Wrapped in a
+        # Clamp it is no longer the scrollable, so GTK allocates the whole
+        # list as one giant widget — and anything past GTK's ~32k-pixel
+        # allocation limit silently stops rendering, which a large library
+        # hits mid-scroll as a blank screen. Width is clamped per row instead.
         self.scroller = Gtk.ScrolledWindow(vexpand=True,
                                            hscrollbar_policy=Gtk.PolicyType.NEVER)
-        self.scroller.set_child(Adw.Clamp(maximum_size=900, child=self.listview))
+        self.scroller.set_child(self.listview)
         self.scroller.get_vadjustment().connect("value-changed", self._maybe_load_more)
 
         self.empty = Adw.StatusPage(
@@ -149,7 +154,7 @@ class LibraryView(Gtk.Box):
         wrapper = Gtk.Stack()
         wrapper.add_named(box, "article")
         wrapper.add_named(heading, "header")
-        item.set_child(wrapper)
+        item.set_child(Adw.Clamp(maximum_size=900, child=wrapper))
         item._parts = (wrapper, date, title, meta, star, heading)
 
     def _bind_row(self, _factory, item) -> None:

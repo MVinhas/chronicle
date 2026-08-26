@@ -34,7 +34,11 @@ def cmd_sources(args) -> int:
 def cmd_add(args) -> int:
     conn = db.get_conn()
     print(f"Inspecting {args.url} …")
-    spec = sources.detect(args.url)
+    try:
+        spec = sources.detect(args.url)
+    except sources.DetectError as exc:
+        print(f"Cannot add this blog: {exc}", file=sys.stderr)
+        return 1
     print(f"  detected: {spec['detected']}")
     if spec.get("partial"):
         print("  note    : this route exposes only recent posts, so the archive "

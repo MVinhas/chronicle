@@ -5,22 +5,25 @@ import re
 from urllib.parse import urlparse
 
 from .. import net
-from . import discovery, wayback
+from . import discovery
 from .base import Cancelled, Content, Context, Source, Stub
 from .discovery import extract_date
 from .generic import GenericSource
 from .ghost import GhostSource
 from .gwern import GwernSource
-from .mmm import MrMoneyMustacheSource
 from .paulgraham import PaulGrahamSource
 from .wordpress import WordPressSource
 
 REGISTRY: dict[str, type[Source]] = {
     cls.plugin_id: cls for cls in (
         GwernSource, PaulGrahamSource, WordPressSource, GhostSource,
-        MrMoneyMustacheSource, GenericSource,
+        GenericSource,
     )
 }
+
+
+class DetectError(Exception):
+    """The site cannot be ingested at all — e.g. it never answers."""
 
 
 def build(row, config: dict | None = None) -> Source:
@@ -42,10 +45,6 @@ RECIPES = [
     dict(plugin="paulgraham", name="Paul Graham", hosts=("paulgraham.com",),
          note="No date metadata exists; dates are read from each essay's "
               "dateline, giving month precision."),
-    dict(plugin="mrmoneymustache", name="Mr. Money Mustache",
-         hosts=("mrmoneymustache.com",),
-         note="Cloudflare-protected; the archive is rebuilt from the Internet "
-              "Archive and dated from each permalink."),
 ]
 
 
@@ -127,14 +126,14 @@ def detect(url: str) -> dict:
         name = _site_title_from(home_html)
     name = name or host.replace("www.", "")
 
-    # The site does not answer at all. There is no API or sitemap to probe on
-    # a server that is not there, so the only route left is whatever the
-    # Internet Archive has crawled.
-    if home_dead and wayback.is_dead(base):
-        return {"plugin": "generic", "name": name, "homepage": base,
-                "config": {"strategy": "wayback"}, "partial": False,
-                "detected": "site unreachable — rebuilding the archive from "
-                            "the Internet Archive"}
+    # The site does not answer at all — no DNS, no connection, not even an
+    # error page. There is nothing to build an archive from, and quietly
+    # adding an empty blog would look like success, so say so instead. (A
+    # 403/404 is a live site being fussy and continues below.)
+    if home_dead:
+        raise DetectError(
+            f"{host} is not answering at all — check the address, or try "
+            f"again when the site is back")
 
     config: dict = {}
     feed_link = _feed_link_from(base, home_html)
@@ -276,5 +275,6 @@ def _feed_home_link(url: str) -> str | None:
     return m.group(1) if m else None
 
 
-__all__ = ["REGISTRY", "RECIPES", "recipe_for", "build", "detect", "Source",
-           "Stub", "Content", "Context", "Cancelled", "extract_date"]
+__all__ = ["REGISTRY", "RECIPES", "recipe_for", "build", "detect",
+           "DetectError", "Source", "Stub", "Content", "Context", "Cancelled",
+           "extract_date"]

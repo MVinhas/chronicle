@@ -99,6 +99,18 @@
   </recommends>
 
   <releases>
+    <release version="1.3.0" date="2026-08-26">
+      <description>
+        <ul>
+          <li>Fixed the library list going blank partway down: a large archive stopped rendering rows past a fixed depth, in every filter. The list is now properly virtualised, so libraries of any size scroll to the end.</li>
+          <li>Dates printed beside links on a blog's own archive index are now read and used — including compact numeric forms like danluu.com's "08/26", which are interpreted only when the whole listing agrees on a format and comes out in chronological order. Articles already archived with worse dates are corrected from the listing at no request cost.</li>
+          <li>A dated &lt;time&gt; element now counts whatever its theme happened to name it, fixing sites whose posts carry dates without conventional class names.</li>
+          <li>Removed the Internet Archive from the pipeline entirely — it was extremely slow and no longer earns its place. The Mr. Money Mustache adapter, which depended on it, is gone too. Adding a site that does not answer at all now says so plainly instead of silently building an empty archive.</li>
+          <li>Blogs stuck on the retired Internet Archive route are automatically re-detected on their next update — a site that is actually live (fs.blog was) comes back on its proper route, such as its WordPress API, and rebuilds from there.</li>
+          <li>The blog's own archive listing is now always consulted, with incremental pagination: once a page contains only already-archived posts, the crawl stops there instead of re-walking the whole history.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.2.0" date="2026-08-26">
       <description>
         <ul>

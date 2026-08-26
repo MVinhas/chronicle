@@ -30,9 +30,9 @@ A feed reader shows you what's new. Chronicle goes and gets what came before.
 Most RSS feeds only list the last handful of posts, so a feed reader can never
 show you a blog's back catalogue. Chronicle works through every route a blog
 offers — its own API where one exists, otherwise its feed, its sitemaps and
-its archive pages combined, or the Internet Archive if the site blocks
-everything else — and merges what they know: the sitemap's completeness with
-the feed's exact dates and full text.
+its archive pages combined — and merges what they know: the sitemap's
+completeness with the feed's exact dates and full text, and the dates a
+blog's own index prints beside each post.
 
 It also gets the dates right, which matters when the whole point is reading in
 order:

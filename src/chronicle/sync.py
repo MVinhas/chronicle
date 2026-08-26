@@ -120,6 +120,16 @@ class Syncer:
             config = json.loads(row["config"] or "{}")
         except json.JSONDecodeError:
             config = {}
+
+        # Heal sources whose stored route no longer exists — a plugin that
+        # was removed, or the retired Internet Archive strategy. The site may
+        # be perfectly alive (fs.blog was); re-detection finds today's best
+        # route instead of failing forever on yesterday's.
+        if row["plugin"] not in sources.REGISTRY or config.get("strategy") == "wayback":
+            row, config = self._redetect(conn, row, config, prog)
+            if row is None:
+                return
+
         source = sources.build(row, config)
 
         # What this source already has, so discovery can skip what is settled
@@ -131,10 +141,11 @@ class Syncer:
 
         known = {
             r["guid"]: (r["published_at"] is not None,
-                        _state(r["content_status"]))
+                        _state(r["content_status"]),
+                        db._date_rank(r["date_confidence"]))
             for r in conn.execute(
-                "SELECT guid, published_at, content_status FROM articles "
-                "WHERE source_id=?", (row["id"],))
+                "SELECT guid, published_at, content_status, date_confidence "
+                "FROM articles WHERE source_id=?", (row["id"],))
         }
 
         new_rejects: list[str] = []
@@ -168,10 +179,8 @@ class Syncer:
                         (article_id,)).fetchone()
                     status = need["content_status"] if need else None
                     # 'gone' means the origin 404s; retry it only when this
-                    # stub brings a new route (a feed body or a snapshot).
-                    retry_gone = (status == "gone"
-                                  and bool(stub.raw_html
-                                           or (stub.extra or {}).get("snapshot")))
+                    # stub brings a new route (a feed-supplied body).
+                    retry_gone = status == "gone" and bool(stub.raw_html)
                     if status in ("pending", "error") or retry_gone:
                         pending.append((article_id, stub.url, stub.raw_html,
                                         stub.base_url, stub.extra))
@@ -213,8 +222,33 @@ class Syncer:
         db.mark_sync(conn, row["id"], status,
                      f"{discovered} examined, {prog.new} new{note}")
 
+    def _redetect(self, conn, row, config, prog: Progress):
+        """Re-run detection for a source whose stored route is obsolete.
+
+        Returns the refreshed (row, config), or (None, None) when the site
+        genuinely cannot be reached — in which case the failure has been
+        recorded on the source.
+        """
+        self._say(prog, f"{row['name']}: re-detecting how to build this archive…")
+        try:
+            spec = sources.detect(row["homepage"] or config.get("feed") or "")
+        except Exception as exc:                      # noqa: BLE001
+            db.mark_sync(conn, row["id"], "error", str(exc))
+            self._say(prog, f"{row['name']}: {exc}")
+            return None, None
+        new_config = dict(spec.get("config") or {})
+        # A section scope the user asked for survives the route change.
+        if config.get("path_prefix") and "path_prefix" not in new_config:
+            new_config["path_prefix"] = config["path_prefix"]
+        new_config["detected"] = spec["detected"] + " (re-detected)"
+        db.update_source_route(conn, row["id"], spec["plugin"], new_config,
+                               spec["homepage"])
+        self._say(prog, f"{row['name']}: now using {spec['detected']}")
+        return db.get_source(conn, row["id"]), new_config
+
     def _record(self, conn, source_id: int, stub) -> tuple[int, bool]:
-        fields = dict(url=stub.url, title=stub.title, author=stub.author,
+        # A metadata-only stub may carry no title; never blank a stored one.
+        fields = dict(url=stub.url, title=stub.title or None, author=stub.author,
                       source_order=stub.source_order, **stub.date.as_fields())
         return db.upsert_article(conn, source_id, stub.guid, **fields)
 
@@ -251,9 +285,8 @@ class Syncer:
         # and shutting the pool down (the `with` block's __exit__) then blocks
         # until every already-started worker finishes -- futures not yet
         # started can be cancelled, but ones mid-flight cannot, so stopping a
-        # sync against something slow (the Internet Archive answers in
-        # 10-15s/page) could take minutes even though should_stop() was set
-        # straight away.
+        # sync against a slow origin could take minutes even though
+        # should_stop() was set straight away.
         with ThreadPoolExecutor(max_workers=workers) as pool:
             items = iter(pending)
             futures: dict = {}

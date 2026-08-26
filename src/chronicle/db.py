@@ -283,6 +283,13 @@ def set_source_config(conn, source_id: int, config: dict) -> None:
                  (json.dumps(config), source_id))
 
 
+def update_source_route(conn, source_id: int, plugin: str, config: dict,
+                        homepage: str) -> None:
+    """Point a source at a freshly-detected ingestion route."""
+    conn.execute("UPDATE sources SET plugin=?, config=?, homepage=? WHERE id=?",
+                 (plugin, json.dumps(config), homepage, source_id))
+
+
 def mark_sync(conn, source_id: int, status: str, message: str = "") -> None:
     conn.execute(
         "UPDATE sources SET last_sync_at=?, last_sync_status=?, last_sync_message=? WHERE id=?",
@@ -374,7 +381,7 @@ def mark_content_error(conn, article_id: int, message: str,
 
     `permanent` marks the page as definitively gone at the origin (404/410):
     it is excluded from routine retries, but a stub arriving with a *new*
-    content route (a feed body, a Wayback snapshot) still gets to try again.
+    content route (a feed-supplied body) still gets to try again.
     """
     status = "gone" if permanent else "error"
     conn.execute(

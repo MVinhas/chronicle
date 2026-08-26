@@ -71,8 +71,7 @@ class SourcesView(Gtk.Box):
             title="Blogs you follow",
             description="Each blog is archived from every route it offers — a "
                         "REST or content API where one exists, otherwise its "
-                        "feed, sitemaps and archive pages combined, or the "
-                        "Internet Archive as a last resort.")
+                        "feed, sitemaps and archive pages combined.")
 
         actions = Gtk.Box(spacing=8)
         add = Gtk.Button(icon_name="list-add-symbolic", tooltip_text="Add a blog",
@@ -158,21 +157,6 @@ class SourcesView(Gtk.Box):
             if detail:
                 row.set_tooltip_text(detail)
 
-            # Offered only once the direct routes have actually been tried and
-            # come up empty -- a full Internet Archive crawl is minutes of
-            # work, so it is worth asking for rather than reaching for it on
-            # every partial miss (see GenericSource.discover).
-            if (src["plugin"] == "generic" and not count
-                    and src["last_sync_status"] == "ok"
-                    and config.get("strategy") != "wayback"):
-                wayback_btn = Gtk.Button(icon_name="folder-download-symbolic",
-                                         valign=Gtk.Align.CENTER, css_classes=["flat"],
-                                         tooltip_text="Nothing found directly — "
-                                                       "try rebuilding from the "
-                                                       "Internet Archive instead")
-                wayback_btn.connect("clicked", self._on_try_wayback, src["id"])
-                row.add_suffix(wayback_btn)
-
             toggle = Gtk.Switch(active=bool(src["enabled"]), valign=Gtk.Align.CENTER,
                                 tooltip_text="Include in the reading queue")
             toggle.connect("state-set", self._on_toggle, src["id"])
@@ -237,19 +221,6 @@ class SourcesView(Gtk.Box):
         return False
 
     def _on_sync_one(self, _btn, source_id) -> None:
-        self.emit("sync-requested", [source_id])
-
-    def _on_try_wayback(self, _btn, source_id) -> None:
-        # Merge, don't replace: the source may carry a section scope or a
-        # feed hint that must survive the strategy switch.
-        conn = self.get_conn()
-        src = db.get_source(conn, source_id)
-        try:
-            config = json.loads(src["config"] or "{}")
-        except json.JSONDecodeError:
-            config = {}
-        config["strategy"] = "wayback"
-        db.set_source_config(conn, source_id, config)
         self.emit("sync-requested", [source_id])
 
     def _on_rename(self, _btn, src) -> None:

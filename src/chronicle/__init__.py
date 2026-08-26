@@ -1,3 +1,3 @@
 """Chronicle — a personal chronological library of the blogs you love."""
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 APP_ID = "io.github.mvinhas.Chronicle"
