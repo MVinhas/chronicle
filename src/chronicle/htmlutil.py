@@ -9,9 +9,16 @@ from __future__ import annotations
 
 import hashlib
 import re
+import warnings
 from urllib.parse import urljoin, urlparse
 
-from bs4 import BeautifulSoup, Comment, NavigableString, Tag
+from bs4 import BeautifulSoup, Comment, NavigableString, Tag, XMLParsedAsHTMLWarning
+
+# `parse()` is deliberately used on both HTML pages and XML-ish blobs (feeds,
+# sitemaps) with the same lenient parser -- bs4's suggestion to switch parsers
+# for XML does not apply here, so silence the warning rather than let it spam
+# every sync.
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 # --------------------------------------------------------------------------
 # vocabulary
