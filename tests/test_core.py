@@ -321,21 +321,55 @@ class TestQueue(unittest.TestCase):
         self.assertEqual(self.db.queue_counts(self.conn)["favourites"], 1)
         self.assertFalse(self.db.toggle_favourite(self.conn, aid))
 
-    def test_hide_read_applies_on_top_of_any_scope(self):
+    def test_hide_read_filters_the_queue_scopes(self):
         a = self.add("a", "2001-01-01T00:00:00")
         self.add("b", "2002-01-01T00:00:00")
         self.db.set_read(self.conn, a, True)
-        self.db.toggle_favourite(self.conn, a)
 
         self.assertEqual(len(self.db.queue(self.conn)), 2)
         self.assertEqual(len(self.db.queue(self.conn, hide_read=True)), 1)
-        # A read favourite disappears from favourites too, when hiding read.
+
+    def test_hide_read_leaves_favourites_alone(self):
+        """Favouriting happens while reading, so favourites are mostly read.
+
+        Applying hide-read here would empty the one list a reader curated by
+        hand, at exactly the moment they went looking for it.
+        """
+        a = self.add("a", "2001-01-01T00:00:00")
+        self.db.set_read(self.conn, a, True)
+        self.db.toggle_favourite(self.conn, a)
+
         self.assertEqual(len(self.db.queue(self.conn, scope="favourites")), 1)
         self.assertEqual(
-            len(self.db.queue(self.conn, scope="favourites", hide_read=True)), 0)
-        # Against the read scope it would contradict itself, so it is ignored.
+            len(self.db.queue(self.conn, scope="favourites", hide_read=True)), 1)
+
+    def test_hide_read_leaves_the_read_scope_alone(self):
+        """It would otherwise contradict itself and always show nothing."""
+        a = self.add("a", "2001-01-01T00:00:00")
+        self.db.set_read(self.conn, a, True)
         self.assertEqual(
             len(self.db.queue(self.conn, scope="read", hide_read=True)), 1)
+
+    def test_unread_favourites_still_listed_when_hiding_read(self):
+        """The exemption widens the list; it must not narrow it."""
+        a = self.add("a", "2001-01-01T00:00:00")
+        b = self.add("b", "2002-01-01T00:00:00")
+        self.db.toggle_favourite(self.conn, a)
+        self.db.toggle_favourite(self.conn, b)
+        self.db.set_read(self.conn, a, True)
+        titles = [r["title"] for r in
+                  self.db.queue(self.conn, scope="favourites", hide_read=True)]
+        self.assertEqual(titles, ["a", "b"])
+
+    def test_navigation_still_skips_read_articles(self):
+        """The exemption is scoped to the favourites list, not to hide-read."""
+        a = self.add("a", "2001-01-01T00:00:00")
+        b = self.add("b", "2002-01-01T00:00:00")
+        c = self.add("c", "2003-01-01T00:00:00")
+        self.db.set_read(self.conn, b, True)
+        self.db.toggle_favourite(self.conn, b)
+        nxt = self.db.neighbour(self.conn, a, +1, hide_read=True)
+        self.assertEqual(nxt["id"], c)
 
     def test_disabled_source_leaves_the_queue(self):
         self.add("a", "2001-01-01T00:00:00")

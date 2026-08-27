@@ -99,6 +99,13 @@
   </recommends>
 
   <releases>
+    <release version="1.4.1" date="2026-08-27">
+      <description>
+        <ul>
+          <li>Hiding read articles no longer empties the Favourites list. Favouriting is something you do to an article while reading it, so almost every favourite is also read — which meant the one list you curate by hand came out empty whenever read articles were hidden. Favourites, like Read, now ignore that setting, and the toggle is shown as inactive there rather than appearing to do nothing.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.4.0" date="2026-08-27">
       <description>
         <ul>

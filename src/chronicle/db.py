@@ -477,6 +477,19 @@ ORDER_CHRONO = " ORDER BY (a.published_at IS NULL), a.published_at ASC, a.source
 ORDER_CHRONO_DESC = " ORDER BY (a.published_at IS NULL), a.published_at DESC, a.source_order DESC, a.id DESC"
 
 
+# Scopes that "hide read articles" must leave alone.
+#
+# Read: hiding read articles from the list of read articles empties it, which
+# is merely silly. Favourites: the same outcome, but it matters more, because
+# favouriting is something you do to an article you are *reading* -- so nearly
+# every favourite is also read, and the list a reader keeps deliberately would
+# come out empty at exactly the moment they went looking for it.
+#
+# Hide-read is a tool for working through the queue. These two scopes are not
+# a queue; they are collections you asked for by name.
+HIDE_READ_EXEMPT = ("read", "favourites")
+
+
 def _filter_sql(scope: str, include_disabled: bool,
                 hide_read: bool = False) -> tuple[str, list]:
     where = ["a.content_status IN ('ok','partial','paywalled')"]
@@ -489,9 +502,7 @@ def _filter_sql(scope: str, include_disabled: bool,
         where.append("r.read_at IS NOT NULL")
     elif scope == "favourites":
         where.append("r.favourite_at IS NOT NULL")
-    # Applies on top of the scope, so favourites can be filtered down to the
-    # ones still unread. Meaningless against the read scope itself.
-    if hide_read and scope != "read":
+    if hide_read and scope not in HIDE_READ_EXEMPT:
         where.append("r.read_at IS NULL")
     return " WHERE " + " AND ".join(where), args
 

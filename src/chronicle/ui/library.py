@@ -271,7 +271,7 @@ class LibraryView(Gtk.Box):
                 f"{counts['favourites']:,} favourites").replace(",", " ")
         if counts["undated"]:
             text += f"  ·  {counts['undated']} undated"
-        if self.hide_read and self.scope != "read":
+        if self.hide_read and self.scope not in db.HIDE_READ_EXEMPT:
             text += "  ·  read articles hidden"
         self.summary.set_label(text)
 
@@ -284,8 +284,10 @@ class LibraryView(Gtk.Box):
     def _on_scope(self, button, scope) -> None:
         if button.get_active():
             self.scope = scope
-            # "Read" and "hide read" contradict each other.
-            self.hide_read_button.set_sensitive(scope != "read")
+            # Greyed out where it does not apply, rather than left looking
+            # active while quietly doing nothing.
+            self.hide_read_button.set_sensitive(
+                scope not in db.HIDE_READ_EXEMPT)
             self.reload()
 
     def _on_hide_read(self, button) -> None:
