@@ -14,12 +14,17 @@ from .. import __version__, dates, db, sync  # noqa: E402
 from .library import LibraryView  # noqa: E402
 from .reader import ReaderView  # noqa: E402
 from .sources_view import SourcesView  # noqa: E402
-from .style import elide_url, reading_minutes  # noqa: E402
+from .style import (elide_url, reading_minutes,  # noqa: E402
+                    resume_scroll, shows_resume_hint, time_remaining)
 
 log = logging.getLogger("chronicle.window")
 
 # Reading past this fraction of an article counts as having read it.
 READ_THRESHOLD = 0.92
+
+# How long the bottom bar says it put you back where you were, before it
+# returns to the ordinary position line.
+RESUME_HINT_SECONDS = 6
 
 APP_CSS = b"""
 .chronicle-filter { padding: 2px 14px; min-height: 26px; }
@@ -49,6 +54,9 @@ class MainWindow(Adw.ApplicationWindow):
         self._reader_editing = False
         self._hovered_link = ""
         self._position_text = ""
+        self._position_prefix = ""
+        self._total_minutes = 0
+        self._resume_hint_id = 0
 
         self.syncer = sync.Syncer(on_progress=self._on_sync_progress)
 
@@ -400,7 +408,13 @@ class MainWindow(Adw.ApplicationWindow):
             self.show_page("sources" if not db.list_sources(self._conn)
                        else "reader")
             return
-        self.open_article(article["id"], remember=False)
+        # Reopening at the top would throw away the position saved on the way
+        # out, which is exactly the thing a long article needs remembered.
+        state = self._state_of(article["id"])
+        stored = state["scroll_pos"] if state else 0.0
+        self.open_article(article["id"])
+        if shows_resume_hint(stored):
+            self._show_resume_hint(stored)
 
     def open_article(self, article_id: int, remember: bool = True) -> None:
         article = db.get_article(self._conn, article_id)
@@ -411,7 +425,10 @@ class MainWindow(Adw.ApplicationWindow):
                                  if self._state_of(article_id) else False)
 
         state = self._state_of(article_id)
-        scroll = (state["scroll_pos"] if state else 0.0) if remember else 0.0
+        scroll = resume_scroll(state["scroll_pos"] if state else 0.0, remember)
+        # The chrome below reads this, so the time left is right on the first
+        # paint rather than a frame of the previous article's figure.
+        self._scroll_frac = scroll
         self.reader.show_article(article, scroll)
         db.state_set(self._conn, "current_article_id", article_id)
         self._update_reader_chrome(article)
@@ -447,10 +464,13 @@ class MainWindow(Adw.ApplicationWindow):
             pos, total = db.position_in_queue(self._conn, article["id"])
             place = f"{pos:,} of {total:,}".replace(",", " ")
 
-        self._position_text = (
-            f"{place}   ·   {article['source_name']}   ·   {label}   ·   {minutes} min")
-        if not self._hovered_link:
-            self.position_label.set_label(self._position_text)
+        # The line is rebuilt from a stable prefix plus a time that changes on
+        # every scroll; keeping them apart means scrolling does not have to
+        # redo the queue queries above.
+        self._position_prefix = (
+            f"{place}   ·   {article['source_name']}   ·   {label}")
+        self._total_minutes = minutes
+        self._refresh_position_text()
 
         state = self._state_of(article["id"])
         self.fav_button.handler_block_by_func(self._on_favourite_toggled)
@@ -521,6 +541,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_scrolled(self, _reader, fraction: float) -> None:
         self._scroll_frac = fraction
+        self._refresh_position_text()
         if fraction >= READ_THRESHOLD and not self._marked_read and self.current:
             self._marked_read = True
             db.set_read(self._conn, self.current["id"], True)
@@ -529,6 +550,7 @@ class MainWindow(Adw.ApplicationWindow):
             self.read_button.handler_unblock_by_func(self._on_read_toggled)
 
     def _flush_scroll(self) -> None:
+        self._clear_resume_hint()
         if self.current is not None:
             db.set_scroll(self._conn, self.current["id"], self._scroll_frac)
             # A note being typed when the reader moves on is committed by the
@@ -572,6 +594,48 @@ class MainWindow(Adw.ApplicationWindow):
     def _on_article_chosen(self, _view, article_id: int) -> None:
         self._flush_scroll()
         self.open_article(article_id)
+
+    def _refresh_position_text(self) -> None:
+        """Rebuild the position line around the time that is actually left."""
+        if not self._position_prefix:
+            return
+        time_text = time_remaining(self._total_minutes, self._scroll_frac)
+        self._position_text = f"{self._position_prefix}   ·   {time_text}"
+        # A hovered link or a live resume hint owns the label until it expires.
+        if not self._hovered_link and not self._resume_hint_id:
+            self.position_label.set_label(self._position_text)
+
+    def _show_resume_hint(self, fraction: float) -> None:
+        """Say, quietly and briefly, that the reader was put back where it was.
+
+        This borrows the bottom bar the same way a hovered link does: the
+        position line is worth less, for a few seconds, than knowing why the
+        article did not open at the top.
+        """
+        self._clear_resume_hint()
+        self.position_label.set_label(
+            f"Resumed where you left off   ·   {round(fraction * 100)}%")
+        self._resume_hint_id = GLib.timeout_add_seconds(
+            RESUME_HINT_SECONDS, self._end_resume_hint)
+
+    def _end_resume_hint(self) -> bool:
+        self._resume_hint_id = 0
+        # A link under the pointer owns the label; let it keep it.
+        if not self._hovered_link:
+            self.position_label.set_label(self._position_text)
+        return GLib.SOURCE_REMOVE
+
+    def _clear_resume_hint(self) -> None:
+        """Retire a pending hint so it cannot overwrite a later label.
+
+        Navigating away inside the hint's few seconds has to put the position
+        line back itself; the timeout that would have done it is gone.
+        """
+        if self._resume_hint_id:
+            GLib.source_remove(self._resume_hint_id)
+            self._resume_hint_id = 0
+            if not self._hovered_link:
+                self.position_label.set_label(self._position_text)
 
     def _on_hovering_link(self, _reader, uri: str) -> None:
         """Show where a link goes, in place of the position line.

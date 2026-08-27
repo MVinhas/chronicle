@@ -674,3 +674,161 @@ class TestNotePreview(unittest.TestCase):
         out = self._line(note="x" * 400)
         self.assertLessEqual(len(out), NOTE_PREVIEW)
         self.assertTrue(out.endswith("\u2026"))
+
+
+class TestTimeRemaining(unittest.TestCase):
+    """The reading time along the foot of the reader.
+
+    Before you start it shows how long the article takes; once you are into
+    it, how much is left. Long articles are the case that matters -- they are
+    why the reader remembers a position at all.
+    """
+
+    @staticmethod
+    def _t(total, fraction):
+        from chronicle.ui.style import time_remaining
+        return time_remaining(total, fraction)
+
+    def test_unstarted_shows_the_whole_article(self):
+        self.assertEqual(self._t(33, 0.0), "33 min")
+
+    def test_a_nudge_off_the_top_is_still_unstarted(self):
+        """Opening an article jitters the scroll a little; that is not progress."""
+        from chronicle.ui.style import STARTED_THRESHOLD
+        self.assertEqual(self._t(33, STARTED_THRESHOLD), "33 min")
+
+    def test_partway_through_counts_down(self):
+        self.assertEqual(self._t(33, 0.43), "19 min left")
+
+    def test_time_left_falls_as_you_read(self):
+        seen = [self._t(60, f) for f in (0.1, 0.3, 0.5, 0.7, 0.9)]
+        minutes = [int(s.split()[0]) for s in seen]
+        self.assertEqual(minutes, sorted(minutes, reverse=True))
+
+    def test_the_last_screen_never_says_zero(self):
+        """Rounding reaches 0 before the article ends; 0 min left is a lie."""
+        self.assertEqual(self._t(33, 0.999), "under a minute left")
+        for f in (0.985, 0.99, 0.995, 1.0):
+            self.assertNotIn("0 min", self._t(33, f))
+
+    def test_a_short_article_survives_the_whole_range(self):
+        """A 1-minute article rounds to zero almost immediately."""
+        for f in (0.0, 0.25, 0.5, 0.75, 1.0):
+            out = self._t(1, f)
+            self.assertNotIn("0 min", out)
+            self.assertTrue(out.endswith("min") or out.endswith("left"), out)
+
+    def test_an_unmeasured_article_does_not_count_down(self):
+        """word_count can be 0; "0 min left" would be worse than the total."""
+        self.assertEqual(self._t(0, 0.5), "0 min")
+
+
+class TestResume(unittest.TestCase):
+    """Picking up where the reader left off.
+
+    The reader used to reopen at the top and then flush that fresh near-zero
+    scroll back over the stored one, so every launch quietly erased the
+    position it was meant to restore. These pin the round trip.
+    """
+
+    def setUp(self):
+        from chronicle import db
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.db = db
+        self.conn = db.connect(self.tmp.name)
+        db.init(self.conn)
+        self.sid = db.add_source(self.conn, "t", "Test", "generic",
+                                 "https://t.example")
+
+    def tearDown(self):
+        self.conn.close()
+        os.unlink(self.tmp.name)
+
+    def add(self, guid, iso="2010-01-01T00:00:00", order=0):
+        aid, _ = self.db.upsert_article(
+            self.conn, self.sid, guid, url=f"https://t.example/{guid}",
+            title=guid, published_at=iso, date_precision="day",
+            date_confidence="exact", date_source="test", source_order=order)
+        self.conn.execute(
+            "UPDATE articles SET content_status='ok', content_html='<p>x</p>' "
+            "WHERE id=?", (aid,))
+        return aid
+
+    def test_scroll_survives_a_round_trip(self):
+        aid = self.add("a")
+        self.db.set_scroll(self.conn, aid, 0.43)
+        row = self.conn.execute(
+            "SELECT scroll_pos FROM reading_state WHERE article_id=?",
+            (aid,)).fetchone()
+        self.assertAlmostEqual(row["scroll_pos"], 0.43)
+
+    def test_resume_returns_the_remembered_article(self):
+        first = self.add("a", "2001-01-01T00:00:00", order=0)
+        later = self.add("b", "2009-01-01T00:00:00", order=1)
+        self.db.state_set(self.conn, "current_article_id", later)
+        self.assertEqual(self.db.resume_article(self.conn)["id"], later,
+                         "resumed the queue head instead of the open article")
+
+    def test_resume_falls_back_to_the_first_unread(self):
+        first = self.add("a", "2001-01-01T00:00:00", order=0)
+        self.add("b", "2009-01-01T00:00:00", order=1)
+        self.assertEqual(self.db.resume_article(self.conn)["id"], first)
+
+    def test_an_unfetched_article_is_not_resumed(self):
+        """A remembered article whose content never arrived cannot be shown."""
+        good = self.add("a", "2001-01-01T00:00:00", order=0)
+        bad = self.add("b", "2009-01-01T00:00:00", order=1)
+        self.conn.execute(
+            "UPDATE articles SET content_status='error' WHERE id=?", (bad,))
+        self.db.state_set(self.conn, "current_article_id", bad)
+        self.assertEqual(self.db.resume_article(self.conn)["id"], good)
+
+
+class TestResumeScroll(unittest.TestCase):
+    """Where reopening an article puts the reader, and whether it says so.
+
+    Launch used to open at the top regardless of the stored position. That
+    lost the place and then destroyed it: the reader reports the fresh
+    near-zero scroll, and that gets flushed over the stored value on the way
+    out, so each launch erased what it should have restored.
+    """
+
+    @staticmethod
+    def _scroll(stored, remember=True):
+        from chronicle.ui.style import resume_scroll
+        return resume_scroll(stored, remember)
+
+    @staticmethod
+    def _hint(stored):
+        from chronicle.ui.style import shows_resume_hint
+        return shows_resume_hint(stored)
+
+    def test_a_stored_position_is_restored(self):
+        self.assertAlmostEqual(self._scroll(0.61), 0.61)
+
+    def test_an_untouched_article_opens_at_the_top(self):
+        self.assertEqual(self._scroll(0.0), 0.0)
+        self.assertEqual(self._scroll(None), 0.0)
+
+    def test_opening_deliberately_at_the_top_still_can(self):
+        """Following a link into an article is not resuming it."""
+        self.assertEqual(self._scroll(0.61, remember=False), 0.0)
+
+    def test_a_position_outside_the_page_is_clamped(self):
+        self.assertEqual(self._scroll(1.4), 1.0)
+        self.assertEqual(self._scroll(-0.2), 0.0)
+
+    def test_the_hint_explains_a_restored_position(self):
+        self.assertTrue(self._hint(0.43))
+
+    def test_no_hint_when_nothing_was_restored(self):
+        """Saying so at the top would be noise -- that is where it opens anyway."""
+        for stored in (None, 0.0, 0.001, 0.02):
+            self.assertFalse(self._hint(stored), stored)
+
+    def test_hint_and_scroll_agree(self):
+        """A hint that appears without a restored position would be a lie."""
+        for stored in (None, 0.0, 0.01, 0.02, 0.03, 0.5, 1.0):
+            if self._hint(stored):
+                self.assertGreater(self._scroll(stored), 0.0, stored)

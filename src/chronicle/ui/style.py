@@ -985,6 +985,46 @@ def reading_minutes(words: int) -> int:
     return max(1, round((words or 0) / WORDS_PER_MINUTE))
 
 
+# Below this much of an article read, "where you left off" is the top anyway.
+STARTED_THRESHOLD = 0.02
+
+
+def resume_scroll(stored: float | None, remember: bool = True) -> float:
+    """Where reopening an article should put the reader.
+
+    The position saved on the way out is the whole point of storing one, so
+    it is restored rather than discarded. Opening at the top instead does not
+    merely lose the place: the reader then reports that fresh near-zero
+    scroll, which is flushed back over the stored value on the way out, so
+    each launch erases the position it was meant to restore.
+    """
+    if not remember or not stored:
+        return 0.0
+    return max(0.0, min(1.0, stored))
+
+
+def shows_resume_hint(stored: float | None) -> bool:
+    """Whether reopening is worth remarking on in the bottom bar."""
+    return bool(stored) and stored > STARTED_THRESHOLD
+
+
+def time_remaining(total_minutes: int, fraction: float) -> str:
+    """The reading time to show in the position line.
+
+    Before you have started, how long the article takes is the useful figure;
+    once you are into it, how much is left replaces it, so the bar carries one
+    number rather than two competing ones.
+    """
+    if not total_minutes or fraction <= STARTED_THRESHOLD:
+        return f"{total_minutes} min"
+    left = round(total_minutes * (1.0 - fraction))
+    if left <= 0:
+        # Rounding reaches zero before the last screen does; "under a minute"
+        # is true there, "0 min left" is not.
+        return "under a minute left"
+    return f"{left} min left"
+
+
 def _esc(text) -> str:
     return _html.escape(str(text or ""), quote=True)
 

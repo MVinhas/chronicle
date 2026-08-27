@@ -259,7 +259,13 @@ def arm(window) -> None:
         try:
             # The reader is a WebView, and only WebKit can render it reliably;
             # the other pages are ordinary widgets, which GSK renders fine.
-            if page == "reader" and capture_reader(window, out, quit_later):
+            # FULL_DOCUMENT renders the whole article and drops the window
+            # chrome, which is right for checking typography and useless for
+            # checking the viewport -- scroll position and the bottom bar only
+            # exist in a window shot.
+            chrome = os.environ.get("CHRONICLE_SHOT_CHROME") == "1"
+            if page == "reader" and not chrome and capture_reader(
+                    window, out, quit_later):
                 return False
             capture_window(window, out)
         except Exception:                             # noqa: BLE001
