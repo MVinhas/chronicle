@@ -99,6 +99,14 @@
   </recommends>
 
   <releases>
+    <release version="1.4.2" date="2026-08-27">
+      <description>
+        <ul>
+          <li>Fixed the note box being impossible to type in: letters bound to reading shortcuts (n, j, f, r and the rest) jumped to the next article instead of being typed. Chronicle already stood those shortcuts down while a search box had focus, but could not tell that a note box inside the reading page had it — so the page now says so. Escape leaves the note and saves it, as it did before.</li>
+          <li>Hovering a link in an article shows where it goes, along the foot of the reading view. Articles are full of links whose text says nothing about their destination.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.4.1" date="2026-08-27">
       <description>
         <ul>

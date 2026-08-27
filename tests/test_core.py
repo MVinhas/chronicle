@@ -563,3 +563,31 @@ class TestHighlightPayload(unittest.TestCase):
             "id": 1, "quote": "</script><img onerror=x>", "prefix": "",
             "suffix": "", "start_offset": 0, "note": ""})])
         self.assertNotIn("</script>", payload)
+
+
+class TestUrlElision(unittest.TestCase):
+    """The hovered-link line along the foot of the reader."""
+
+    @staticmethod
+    def _elide(uri):
+        from chronicle.ui.style import elide_url
+        return elide_url(uri)
+
+    def test_short_urls_are_untouched(self):
+        u = "https://example.com/a-post"
+        self.assertEqual(self._elide(u), u)
+
+    def test_long_urls_are_capped(self):
+        from chronicle.ui.style import URL_MAX
+        out = self._elide("https://example.com/" + "x" * 300)
+        self.assertLessEqual(len(out), URL_MAX)
+        self.assertTrue(out.endswith("\u2026"))
+
+    def test_never_cuts_a_percent_escape_in_half(self):
+        """A trailing "%E" renders as mojibake in the tooltip."""
+        import re as _re
+        for pad in range(60, 90):
+            out = self._elide("https://e.com/" + "y" * pad + "%E2%80%99tail")
+            self.assertIsNone(
+                _re.search(r"%[0-9A-Fa-f]?$", out.rstrip("\u2026")),
+                f"split escape at pad={pad}: {out!r}")

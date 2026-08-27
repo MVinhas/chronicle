@@ -909,23 +909,54 @@ SCRIPT = r"""
       if (saveTimer) clearTimeout(saveTimer);
       saveTimer = setTimeout(flushNote, 700);
     });
+
+    // The reader's single-key shortcuts (n, j, f, r…) are *window*
+    // accelerators: GTK matches them before the key ever reaches the
+    // WebView, so no amount of preventDefault in here can hold on to a
+    // plain "n". The app has to stand them down while this field has
+    // focus, and the app cannot see that by itself -- from GTK's side the
+    // focused widget is the WebView, not the textarea inside it. So the
+    // page says so.
+    noteBox.addEventListener('focus', function () {
+      send({ type: 'editing', value: true });
+    });
     // Leaving the field, or the page, must not lose what was typed.
-    noteBox.addEventListener('blur', flushNote);
+    noteBox.addEventListener('blur', function () {
+      flushNote();
+      send({ type: 'editing', value: false });
+    });
     window.addEventListener('pagehide', flushNote);
     window.chronicleFlushNote = flushNote;
 
-    // The reader's single-key shortcuts (n, f, r…) are window accelerators on
-    // the GTK side and never reach the WebView, but Escape should still let
-    // go of the field so they start working again.
     noteBox.addEventListener('keydown', function (ev) {
-      if (ev.key === 'Escape') { flushNote(); noteBox.blur(); }
-      ev.stopPropagation();
+      if (ev.key === 'Escape') { noteBox.blur(); }
     });
   }
 
   render();
 })();
 """
+
+
+# Long enough to see where a link goes, short enough not to push the reader's
+# buttons around as the pointer moves.
+URL_MAX = 96
+
+
+def elide_url(uri: str) -> str:
+    """A URL trimmed for a one-line status, keeping the part that identifies it.
+
+    The host and the start of the path say where a link goes; a long tail of
+    slug and query string does not, so that is what gets dropped.
+    """
+    if len(uri) <= URL_MAX:
+        return uri
+    cut = uri[:URL_MAX - 1]
+    # Do not leave half of a percent-escape behind ("%E2" cut to "%E"), which
+    # would render as mojibake in the tooltip.
+    if "%" in cut[-2:]:
+        cut = cut[:cut.rfind("%")]
+    return cut + "…"
 
 
 def reading_minutes(words: int) -> int:

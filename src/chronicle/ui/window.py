@@ -14,7 +14,7 @@ from .. import __version__, dates, db, sync  # noqa: E402
 from .library import LibraryView  # noqa: E402
 from .reader import ReaderView  # noqa: E402
 from .sources_view import SourcesView  # noqa: E402
-from .style import reading_minutes  # noqa: E402
+from .style import elide_url, reading_minutes  # noqa: E402
 
 log = logging.getLogger("chronicle.window")
 
@@ -39,6 +39,9 @@ class MainWindow(Adw.ApplicationWindow):
         self.current = None
         self._scroll_frac = 0.0
         self._marked_read = False
+        self._reader_editing = False
+        self._hovered_link = ""
+        self._position_text = ""
 
         self.syncer = sync.Syncer(on_progress=self._on_sync_progress)
 
@@ -129,6 +132,8 @@ class MainWindow(Adw.ApplicationWindow):
         self.reader.connect("scrolled", self._on_scrolled)
         self.reader.connect("link-activated", self._on_link)
         self.reader.connect("note-requested", self._on_highlight_note)
+        self.reader.connect("editing", self._on_reader_editing)
+        self.reader.connect("hovering-link", self._on_hovering_link)
         self.reader.connect("annotations-changed",
                             lambda *_: self.refresh_library())
 
@@ -236,8 +241,21 @@ class MainWindow(Adw.ApplicationWindow):
     def _is_text_entry(self, widget) -> bool:
         return isinstance(widget, (Gtk.Editable, Gtk.TextView))
 
+    def _typing(self) -> bool:
+        """Is the user entering text anywhere -- GTK widget or inside a page?
+
+        A focused GtkEntry is visible to GTK. A focused <textarea> in the
+        reader is not: the focused widget there is the WebView as a whole,
+        so the page reports it and the reader passes it along.
+        """
+        return self._is_text_entry(self.get_focus()) or self._reader_editing
+
     def _on_focus_changed(self, *_args) -> None:
-        self._set_bare_accels(not self._is_text_entry(self.get_focus()))
+        self._set_bare_accels(not self._typing())
+
+    def _on_reader_editing(self, _reader, editing: bool) -> None:
+        self._reader_editing = editing
+        self._set_bare_accels(not self._typing())
 
     def _set_bare_accels(self, enabled: bool) -> None:
         app = self.get_application()
@@ -250,6 +268,13 @@ class MainWindow(Adw.ApplicationWindow):
 
     def on_escape(self, *_args) -> None:
         """Leave the search field first; only then leave the page."""
+        # Escape keeps its accelerator while the note box has focus (it is
+        # registered as a modified accel, not a bare one), so it arrives here
+        # rather than at the page. Hand it back: blurring the textarea saves
+        # the note and re-arms the single-key shortcuts.
+        if self._reader_editing:
+            self.reader.blur_editor()
+            return
         focus = self.get_focus()
         if self._is_text_entry(focus):
             if hasattr(self, "library") and focus is self.library.search:
@@ -391,6 +416,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _update_reader_chrome(self, article) -> None:
         if article is None:
+            self._position_text = ""
             self.position_label.set_label("")
             for w in (self.prev_button, self.next_button, self.fav_button,
                       self.read_button):
@@ -414,8 +440,10 @@ class MainWindow(Adw.ApplicationWindow):
             pos, total = db.position_in_queue(self._conn, article["id"])
             place = f"{pos:,} of {total:,}".replace(",", " ")
 
-        self.position_label.set_label(
+        self._position_text = (
             f"{place}   ·   {article['source_name']}   ·   {label}   ·   {minutes} min")
+        if not self._hovered_link:
+            self.position_label.set_label(self._position_text)
 
         state = self._state_of(article["id"])
         self.fav_button.handler_block_by_func(self._on_favourite_toggled)
@@ -537,6 +565,17 @@ class MainWindow(Adw.ApplicationWindow):
     def _on_article_chosen(self, _view, article_id: int) -> None:
         self._flush_scroll()
         self.open_article(article_id)
+
+    def _on_hovering_link(self, _reader, uri: str) -> None:
+        """Show where a link goes, in place of the position line.
+
+        The bottom bar is where the eye already is, and the position is worth
+        less than the destination for as long as a link is under the pointer.
+        """
+        self._hovered_link = uri
+        self.position_label.set_label(elide_url(uri) if uri
+                                      else self._position_text)
+        self.position_label.set_tooltip_text(uri or None)
 
     def _on_link(self, _reader, uri: str) -> None:
         Gtk.UriLauncher(uri=uri).launch(self, None, None, None)

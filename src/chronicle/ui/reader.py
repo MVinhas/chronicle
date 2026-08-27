@@ -50,6 +50,12 @@ class ReaderView(Gtk.Box):
         "note-requested": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
         # Something the reader wrote was stored; the library shows it.
         "annotations-changed": (GObject.SignalFlags.RUN_FIRST, None, ()),
+        # True while a text field *inside the page* has focus. GTK cannot see
+        # that on its own -- it only knows the WebView is focused -- and the
+        # window needs it to stand down the single-key shortcuts.
+        "editing": (GObject.SignalFlags.RUN_FIRST, None, (bool,)),
+        # The link under the pointer, or "" when there is none.
+        "hovering-link": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
     }
 
     def __init__(self):
@@ -59,6 +65,7 @@ class ReaderView(Gtk.Box):
         self._last_scroll = 0.0
         self._article = None
         self._placeholder: tuple[str, str] | None = None
+        self._editing = False
         self.dark = False
 
         self.web_context = WebKit.WebContext()
@@ -94,6 +101,7 @@ class ReaderView(Gtk.Box):
         settings.set_default_font_family("serif")
 
         self.webview.set_background_color(_rgba(style.BACKGROUND["light"]))
+        self.webview.connect("mouse-target-changed", self._on_mouse_target)
         self.webview.connect("decide-policy", self._on_policy)
         self.webview.connect("load-changed", self._on_load_changed)
         self.webview.connect("context-menu", lambda *_: True)
@@ -152,6 +160,7 @@ class ReaderView(Gtk.Box):
         self._placeholder = None
         self._pending_scroll = scroll or 0.0
         self._last_scroll = self._pending_scroll
+        self._set_editing(False)
         conn = db.get_conn()
         self.webview.load_html(
             style.build_document(article, self.dark,
@@ -160,6 +169,7 @@ class ReaderView(Gtk.Box):
             article["url"] or None)
 
     def show_placeholder(self, heading: str, body: str) -> None:
+        self._set_editing(False)
         self.article_id = None
         self._article = None
         self._placeholder = (heading, body)
@@ -214,9 +224,17 @@ class ReaderView(Gtk.Box):
         if kind == "scroll":
             self._last_scroll = float(payload.get("value") or 0.0)
             self.emit("scrolled", self._last_scroll)
+        elif kind == "editing":
+            self._set_editing(bool(payload.get("value")))
         elif kind in ("note", "highlight-add", "highlight-remove",
                       "highlight-note", "anchors"):
             self._on_annotation(kind, payload)
+
+    def _set_editing(self, editing: bool) -> None:
+        if editing == self._editing:
+            return
+        self._editing = editing
+        self.emit("editing", editing)
 
     # -- annotations -------------------------------------------------------
 
@@ -285,6 +303,15 @@ class ReaderView(Gtk.Box):
         self._run_js(
             f"window.chronicleSetHighlights({style.highlights_json(rows)});")
 
+    def blur_editor(self) -> None:
+        """Let go of a focused field inside the page.
+
+        The blur handler there saves the note and reports focus lost, which is
+        what re-arms the reader's single-key shortcuts.
+        """
+        self._run_js("if (document.activeElement && document.activeElement.blur) "
+                     "document.activeElement.blur();")
+
     def flush_note(self, wait: bool = False) -> None:
         """Commit a half-typed note before the reader moves on.
 
@@ -306,6 +333,16 @@ class ReaderView(Gtk.Box):
                 # never dirty in the first place.
                 break
             context.iteration(False)
+
+    def _on_mouse_target(self, _view, hit, _modifiers) -> None:
+        """Report the link under the pointer so the window can show it.
+
+        Articles are full of links whose text says nothing about where they
+        go ("this", "here", a quoted phrase), and the reader cannot see a
+        target the way a browser's status bar shows one.
+        """
+        uri = hit.get_link_uri() if hit.context_is_link() else ""
+        self.emit("hovering-link", uri or "")
 
     def _on_policy(self, _view, decision, decision_type) -> bool:
         if decision_type != WebKit.PolicyDecisionType.NAVIGATION_ACTION:

@@ -92,6 +92,9 @@ the file, so they stay put when a blog edits a post or Chronicle re-fetches it.
 If the text a highlight marked really does disappear, the highlight is kept and
 listed as no longer present rather than quietly thrown away.
 
+While the note box has focus the single-key reading shortcuts stand down, so
+you can type freely; `Esc` leaves the box and saves what you wrote.
+
 All of it stays on your machine, and an archive update never overwrites it.
 
 ## Keeping up to date
