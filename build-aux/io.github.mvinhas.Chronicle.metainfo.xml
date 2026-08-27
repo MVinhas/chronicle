@@ -99,6 +99,15 @@
   </recommends>
 
   <releases>
+    <release version="1.5.0" date="2026-08-27">
+      <description>
+        <ul>
+          <li>A <em>Notes</em> filter in the library, alongside Favourites, collecting every article you wrote a note on or highlighted a passage in.</li>
+          <li>The queue shows what you wrote, on one line beneath each article: your note about the piece, or failing that something you highlighted, set in italic so it reads as your voice rather than the article's. Rows you have not annotated are unchanged.</li>
+          <li>The library's empty state now says why a list is empty — an empty Notes filter is not the same situation as an empty library, and no longer suggests adding a blog to someone who simply has not written any notes yet.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.4.2" date="2026-08-27">
       <description>
         <ul>
@@ -120,8 +129,8 @@
           <li>Notes and highlights. Select any passage while reading to mark it, click a highlight to attach a note to it, and write a note about the article itself at the foot of the reading surface. Both are yours alone — they are never sent anywhere, and an archive update never overwrites them.</li>
           <li>Highlights are anchored to the words they mark, not to a position in the file, so they survive a blog editing its post or Chronicle re-fetching it with a better extractor. A highlight whose text genuinely disappears from an article is kept and listed as no longer present, rather than being silently discarded.</li>
           <li>Articles carrying a note or a highlight are marked as such in the reading queue.</li>
-          <li>Updating is now two separate actions, because they are two very different jobs. &lt;b&gt;Fetch new posts&lt;/b&gt; collects only what each blog has published since its last update, reading the routes that list the newest posts first and stopping as soon as they reach what is already archived — a routine update that takes seconds. &lt;b&gt;Full archive scan&lt;/b&gt; is the old behaviour, re-examining each blog's entire history, and is what you want after adding a blog or to fill gaps.</li>
-          <li>F5 now fetches new posts; Shift+F5 runs the full scan. Each blog also has both actions on its own row. The command line gains &lt;code&gt;chronicle sync --newest&lt;/code&gt;.</li>
+          <li>Updating is now two separate actions, because they are two very different jobs. <em>Fetch new posts</em> collects only what each blog has published since its last update, reading the routes that list the newest posts first and stopping as soon as they reach what is already archived — a routine update that takes seconds. <em>Full archive scan</em> is the old behaviour, re-examining each blog's entire history, and is what you want after adding a blog or to fill gaps.</li>
+          <li>F5 now fetches new posts; Shift+F5 runs the full scan. Each blog also has both actions on its own row. The command line gains <code>chronicle sync --newest</code>.</li>
           <li>Screenshots of the reading view are captured through WebKit's own renderer, fixing captures that came out with the article text missing.</li>
         </ul>
       </description>

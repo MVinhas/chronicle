@@ -540,6 +540,59 @@ class TestAnnotations(unittest.TestCase):
         self.assertEqual(
             self.conn.execute("SELECT COUNT(*) c FROM notes").fetchone()["c"], 0)
 
+    def test_annotated_scope_collects_notes_and_highlights(self):
+        """Anything the reader wrote on, by either means."""
+        noted = self.aid
+        self.db.set_note(self.conn, noted, "a thought")
+        marked, _ = self.db.upsert_article(
+            self.conn, self.sid, "b", url="https://t.example/b", title="B",
+            published_at="2011-01-01T00:00:00", date_precision="day",
+            date_confidence="exact", date_source="t")
+        self.conn.execute("UPDATE articles SET content_status='ok', "
+                          "content_html='<p>x</p>' WHERE id=?", (marked,))
+        self.db.add_highlight(self.conn, marked, "a phrase")
+        plain, _ = self.db.upsert_article(
+            self.conn, self.sid, "c", url="https://t.example/c", title="C",
+            published_at="2012-01-01T00:00:00", date_precision="day",
+            date_confidence="exact", date_source="t")
+        self.conn.execute("UPDATE articles SET content_status='ok', "
+                          "content_html='<p>x</p>' WHERE id=?", (plain,))
+
+        titles = [r["title"] for r in
+                  self.db.queue(self.conn, scope="annotated")]
+        self.assertEqual(titles, ["A", "B"])
+        self.assertEqual(self.db.queue_counts(self.conn)["annotated"], 2)
+
+    def test_annotated_scope_ignores_hide_read(self):
+        """Notes are a collection asked for by name, not a queue to work off."""
+        self.db.set_note(self.conn, self.aid, "a thought")
+        self.db.set_read(self.conn, self.aid, True)
+        self.assertEqual(
+            len(self.db.queue(self.conn, scope="annotated", hide_read=True)), 1)
+
+    def test_clearing_the_last_annotation_leaves_the_scope(self):
+        self.db.set_note(self.conn, self.aid, "a thought")
+        self.assertEqual(self.db.queue_counts(self.conn)["annotated"], 1)
+        self.db.set_note(self.conn, self.aid, "")
+        self.assertEqual(self.db.queue_counts(self.conn)["annotated"], 0)
+
+    def test_queue_carries_the_text_to_preview(self):
+        """The row shows the note; failing that, something highlighted."""
+        self.db.add_highlight(self.conn, self.aid, "the marked words")
+        row = self.db.queue(self.conn, scope="annotated")[0]
+        self.assertIsNone(row["note_body"])
+        self.assertEqual(row["first_mark"], "the marked words")
+
+        self.db.set_note(self.conn, self.aid, "what I thought")
+        row = self.db.queue(self.conn, scope="annotated")[0]
+        self.assertEqual(row["note_body"], "what I thought")
+
+    def test_a_highlights_own_note_is_preferred_to_its_quote(self):
+        hid = self.db.add_highlight(self.conn, self.aid, "the marked words")
+        self.db.set_highlight_note(self.conn, hid, "why it mattered")
+        row = self.db.queue(self.conn, scope="annotated")[0]
+        self.assertEqual(row["first_mark"], "why it mattered")
+
     def test_queue_reports_annotation_counts(self):
         self.db.add_highlight(self.conn, self.aid, "one")
         self.db.add_highlight(self.conn, self.aid, "two")
@@ -591,3 +644,33 @@ class TestUrlElision(unittest.TestCase):
             self.assertIsNone(
                 _re.search(r"%[0-9A-Fa-f]?$", out.rstrip("\u2026")),
                 f"split escape at pad={pad}: {out!r}")
+
+
+class TestNotePreview(unittest.TestCase):
+    """The line of the reader's own writing shown under a queue row."""
+
+    @staticmethod
+    def _line(note=None, mark=None):
+        from chronicle.ui.style import note_line
+        return note_line({"note_body": note, "first_mark": mark})
+
+    def test_nothing_written_gives_no_line(self):
+        self.assertEqual(self._line(), "")
+        self.assertEqual(self._line(note="", mark=""), "")
+
+    def test_the_articles_own_note_wins(self):
+        self.assertEqual(self._line(note="my note", mark="a quote"), "my note")
+
+    def test_a_highlight_stands_in_when_there_is_no_note(self):
+        """Quoted, because it is the article's words rather than the reader's."""
+        self.assertEqual(self._line(mark="a quote"), "\u201ca quote\u201d")
+
+    def test_whitespace_is_collapsed_to_one_line(self):
+        self.assertEqual(self._line(note="two\n\nlines   here"),
+                         "two lines here")
+
+    def test_long_notes_are_trimmed(self):
+        from chronicle.ui.style import NOTE_PREVIEW
+        out = self._line(note="x" * 400)
+        self.assertLessEqual(len(out), NOTE_PREVIEW)
+        self.assertTrue(out.endswith("\u2026"))

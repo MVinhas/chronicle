@@ -959,6 +959,28 @@ def elide_url(uri: str) -> str:
     return cut + "…"
 
 
+# A note line long enough to recognise the thought, short enough to keep the
+# queue scannable. Beyond this the reader is better served by opening it.
+NOTE_PREVIEW = 120
+
+
+def note_line(row) -> str:
+    """The one line of the reader's own writing to show under a queue row.
+
+    Their note about the article says the most, so it wins. Failing that,
+    something they marked -- a note on a highlight, else the highlighted words
+    -- so a marked-up article is never a blank row in the Notes list.
+    """
+    for value, quoted in ((row["note_body"], False), (row["first_mark"], True)):
+        text = " ".join((value or "").split())
+        if not text:
+            continue
+        if len(text) > NOTE_PREVIEW:
+            text = text[:NOTE_PREVIEW - 1].rstrip() + "…"
+        return f"“{text}”" if quoted else text
+    return ""
+
+
 def reading_minutes(words: int) -> int:
     return max(1, round((words or 0) / WORDS_PER_MINUTE))
 

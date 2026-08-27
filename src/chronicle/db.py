@@ -467,7 +467,15 @@ SELECT a.id, a.title, a.url, a.published_at, a.date_precision, a.date_confidence
        a.source_id, s.name AS source_name, s.slug AS source_slug,
        r.read_at, r.favourite_at, r.scroll_pos,
        (SELECT COUNT(*) FROM highlights h WHERE h.article_id = a.id) AS highlight_count,
-       (SELECT COUNT(*) FROM notes n WHERE n.article_id = a.id) AS note_count
+       (SELECT COUNT(*) FROM notes n WHERE n.article_id = a.id) AS note_count,
+       -- What the reader wrote, for the queue to show a line of. Their own
+       -- note comes first; failing that, the first thing they highlighted,
+       -- so a marked-up article is never a blank row in the Notes list.
+       (SELECT n.body FROM notes n WHERE n.article_id = a.id) AS note_body,
+       (SELECT COALESCE(NULLIF(h.note, ''), h.quote) FROM highlights h
+          WHERE h.article_id = a.id
+          ORDER BY h.orphaned_at IS NOT NULL, h.start_offset, h.id
+          LIMIT 1) AS first_mark
 FROM articles a
 JOIN sources s ON s.id = a.source_id
 LEFT JOIN reading_state r ON r.article_id = a.id
@@ -480,14 +488,14 @@ ORDER_CHRONO_DESC = " ORDER BY (a.published_at IS NULL), a.published_at DESC, a.
 # Scopes that "hide read articles" must leave alone.
 #
 # Read: hiding read articles from the list of read articles empties it, which
-# is merely silly. Favourites: the same outcome, but it matters more, because
-# favouriting is something you do to an article you are *reading* -- so nearly
-# every favourite is also read, and the list a reader keeps deliberately would
-# come out empty at exactly the moment they went looking for it.
+# is merely silly. Favourites and Notes: the same outcome, but it matters
+# more, because both are things you do to an article you are *reading* -- so
+# nearly everything in them is also read, and a list the reader built by hand
+# would come out empty at exactly the moment they went looking for it.
 #
-# Hide-read is a tool for working through the queue. These two scopes are not
-# a queue; they are collections you asked for by name.
-HIDE_READ_EXEMPT = ("read", "favourites")
+# Hide-read is a tool for working through the queue. These scopes are not a
+# queue; they are collections you asked for by name.
+HIDE_READ_EXEMPT = ("read", "favourites", "annotated")
 
 
 def _filter_sql(scope: str, include_disabled: bool,
@@ -502,6 +510,11 @@ def _filter_sql(scope: str, include_disabled: bool,
         where.append("r.read_at IS NOT NULL")
     elif scope == "favourites":
         where.append("r.favourite_at IS NOT NULL")
+    elif scope == "annotated":
+        # Anything the reader wrote on: a note about the article, a
+        # highlight, or a note attached to a highlight.
+        where.append("(EXISTS (SELECT 1 FROM notes n WHERE n.article_id = a.id) "
+                     "OR EXISTS (SELECT 1 FROM highlights h WHERE h.article_id = a.id))")
     if hide_read and scope not in HIDE_READ_EXEMPT:
         where.append("r.read_at IS NULL")
     return " WHERE " + " AND ".join(where), args
@@ -538,6 +551,10 @@ def queue_counts(conn) -> dict[str, int]:
     out["read"] = out["all"] - out["unread"]
     out["favourites"] = conn.execute(
         f"SELECT COUNT(*) c {base} AND r.favourite_at IS NOT NULL").fetchone()["c"]
+    out["annotated"] = conn.execute(
+        f"SELECT COUNT(*) c {base} AND (EXISTS (SELECT 1 FROM notes n "
+        f"WHERE n.article_id = a.id) OR EXISTS (SELECT 1 FROM highlights h "
+        f"WHERE h.article_id = a.id))").fetchone()["c"]
     out["undated"] = conn.execute(
         f"SELECT COUNT(*) c {base} AND a.published_at IS NULL").fetchone()["c"]
     return out

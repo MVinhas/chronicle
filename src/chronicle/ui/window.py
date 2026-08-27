@@ -25,6 +25,13 @@ APP_CSS = b"""
 .chronicle-filter { padding: 2px 14px; min-height: 26px; }
 .chronicle-position { font-size: 0.82em; }
 .chronicle-reader-title { font-weight: 600; }
+/* The reader's own writing in the queue: italic and accented, so it reads as
+   a different voice from the article's metadata rather than more of it. */
+.chronicle-note {
+  font-style: italic;
+  opacity: 0.85;
+  margin-top: 1px;
+}
 """
 
 

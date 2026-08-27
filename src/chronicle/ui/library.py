@@ -10,7 +10,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
 from .. import dates, db  # noqa: E402
-from .style import reading_minutes  # noqa: E402
+from .style import note_line, reading_minutes  # noqa: E402
 
 PAGE_SIZE = 400
 
@@ -67,7 +67,8 @@ class LibraryView(Gtk.Box):
         self._buttons: dict[str, Gtk.ToggleButton] = {}
         first = None
         for scope, label in (("all", "All"), ("unread", "Unread"),
-                             ("favourites", "Favourites"), ("read", "Read")):
+                             ("favourites", "Favourites"), ("annotated", "Notes"),
+                             ("read", "Read")):
             btn = Gtk.ToggleButton(label=label)
             btn.add_css_class("chronicle-filter")
             if first is None:
@@ -140,8 +141,15 @@ class LibraryView(Gtk.Box):
         title.set_max_width_chars(64)
         meta = Gtk.Label(xalign=0, css_classes=["dim-label", "caption"],
                          ellipsize=Pango.EllipsizeMode.END)
+        # What the reader wrote, shown only on rows that have something. It
+        # sits below the meta line and is styled apart from it, so a queue of
+        # ordinary articles looks exactly as it did before.
+        note = Gtk.Label(xalign=0, css_classes=["caption", "chronicle-note"],
+                         ellipsize=Pango.EllipsizeMode.END, visible=False)
+        note.set_max_width_chars(64)
         text.append(title)
         text.append(meta)
+        text.append(note)
         box.append(text)
 
         star = Gtk.Image(icon_name="starred-symbolic", css_classes=["accent"])
@@ -155,13 +163,14 @@ class LibraryView(Gtk.Box):
         wrapper.add_named(box, "article")
         wrapper.add_named(heading, "header")
         item.set_child(Adw.Clamp(maximum_size=900, child=wrapper))
-        item._parts = (wrapper, date, title, meta, star, heading)
+        item._parts = (wrapper, date, title, meta, note, star, heading)
 
     def _bind_row(self, _factory, item) -> None:
-        wrapper, date, title, meta, star, heading = item._parts
+        wrapper, date, title, meta, note, star, heading = item._parts
         obj = item.get_item()
 
         if obj.kind == "header":
+            note.set_visible(False)
             heading.set_label(obj.label)
             wrapper.set_visible_child_name("header")
             item.set_activatable(False)
@@ -203,6 +212,13 @@ class LibraryView(Gtk.Box):
             bits.append("noted")
         meta.set_label("  ·  ".join(bits))
 
+        # Rows are recycled as the list scrolls, so this has to be cleared on
+        # articles without one -- otherwise a note bleeds onto a later row.
+        written = note_line(row)
+        note.set_label(written)
+        note.set_visible(bool(written))
+        note.set_tooltip_text(written or None)
+
         star.set_visible(bool(row["favourite_at"]))
 
     # -- data --------------------------------------------------------------
@@ -214,8 +230,51 @@ class LibraryView(Gtk.Box):
         self._last_year = None
         self._load_page()
         self._update_summary()
-        self.stack.set_visible_child_name(
-            "list" if self.store.get_n_items() else "empty")
+        empty = not self.store.get_n_items()
+        if empty:
+            self._describe_empty()
+        self.stack.set_visible_child_name("empty" if empty else "list")
+
+    def _describe_empty(self) -> None:
+        """Say why the list is empty, which depends on what was asked for.
+
+        An empty library and an empty filter are different situations, and
+        "add a blog" is unhelpful advice for someone who has simply not
+        written any notes yet.
+        """
+        if self.search_text:
+            self.empty.set_icon_name("system-search-symbolic")
+            self.empty.set_title("No matches")
+            self.empty.set_description(
+                f"Nothing in the library matches “{self.search_text}”.")
+            return
+        if db.queue_counts(self.get_conn())["all"] == 0:
+            self.empty.set_icon_name("document-open-recent-symbolic")
+            self.empty.set_title("Nothing here yet")
+            self.empty.set_description(
+                "Add a blog from the Blogs tab, then build its archive "
+                "to start reading.")
+            return
+        blurb = {
+            "annotated": ("No notes yet",
+                          "Notes and highlights you leave while reading "
+                          "collect here. Select any passage in an article to "
+                          "highlight it, or write a note at the foot of one."),
+            "favourites": ("No favourites yet",
+                           "Press F while reading, or the star in the "
+                           "reader's bottom bar, to keep an article here."),
+            "unread": ("Nothing unread",
+                       "You have read everything in the queue."),
+            "read": ("Nothing read yet",
+                     "Articles you finish collect here."),
+        }.get(self.scope)
+        if blurb is None:
+            blurb = ("Nothing here", "No articles match this filter.")
+        self.empty.set_icon_name("view-list-symbolic"
+                                 if self.scope != "annotated"
+                                 else "format-text-rich-symbolic")
+        self.empty.set_title(blurb[0])
+        self.empty.set_description(blurb[1])
 
     def refresh_if_at_top(self) -> None:
         """Pick up newly-synced articles, but never while mid-scroll.
@@ -269,6 +328,8 @@ class LibraryView(Gtk.Box):
         counts = db.queue_counts(self.get_conn())
         text = (f"{counts['all']:,} articles  ·  {counts['unread']:,} unread  ·  "
                 f"{counts['favourites']:,} favourites").replace(",", " ")
+        if counts["annotated"]:
+            text += f"  ·  {counts['annotated']:,} with notes".replace(",", " ")
         if counts["undated"]:
             text += f"  ·  {counts['undated']} undated"
         if self.hide_read and self.scope not in db.HIDE_READ_EXEMPT:
