@@ -40,8 +40,8 @@
                 {
                     "type": "git",
                     "url": "https://github.com/MVinhas/chronicle.git",
-                    "tag": "v1.3.0",
-                    "commit": "c06a282f08ba0c00eab1647e45fa7b494f916ac1",
+                    "tag": "v1.4.0",
+                    "commit": "780bce4e9fe64928d09f521d28f81df236c19fb3",
                     "x-checker-data": {
                         "type": "git",
                         "tag-pattern": "^v([\\d.]+)$"
