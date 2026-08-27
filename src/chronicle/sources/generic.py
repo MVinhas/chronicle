@@ -43,13 +43,22 @@ class GenericSource(Source):
                 and self.config.get("feed") != (feed_url or "")):
             ctx.config_updates["feed"] = feed_url or ""
 
-        # 2. Sitemap: the site's own enumeration of everything.
-        sitemap_urls, sitemap_src = discovery.read_sitemaps(base, self.config, ctx)
-        report.sitemap_url, report.sitemap_count = sitemap_src, len(sitemap_urls)
-        if sitemap_urls:
-            ctx.say(f"{self.name}: {len(sitemap_urls)} pages in sitemap")
-        if sitemap_src and sitemap_src != self.config.get("sitemap"):
-            ctx.config_updates["sitemap"] = sitemap_src
+        # 2. Sitemap: the site's own enumeration of everything. This is the
+        #    completeness route and also the expensive one -- a sitemap index
+        #    can be dozens of child documents -- and it is ordered by nothing
+        #    in particular, so it cannot be stopped early. "Fetch new posts"
+        #    therefore skips it: the feed and the front of the archive index
+        #    already carry anything published since the last update.
+        sitemap_urls: list[str] = []
+        sitemap_src = None
+        if not ctx.newest_only:
+            sitemap_urls, sitemap_src = discovery.read_sitemaps(
+                base, self.config, ctx)
+            report.sitemap_url, report.sitemap_count = sitemap_src, len(sitemap_urls)
+            if sitemap_urls:
+                ctx.say(f"{self.name}: {len(sitemap_urls)} pages in sitemap")
+            if sitemap_src and sitemap_src != self.config.get("sitemap"):
+                ctx.config_updates["sitemap"] = sitemap_src
 
         # 3. Archive pages: always consulted — the site's own listing is both
         #    an enumeration and, on many blogs, the only place dates appear.
@@ -61,7 +70,8 @@ class GenericSource(Source):
                     or bool(ctx.rejected and guid in ctx.rejected))
 
         archive_entries, index = discovery.read_archive(
-            base, self.config, ctx, self.in_scope, is_known=already_known)
+            base, self.config, ctx, self.in_scope, is_known=already_known,
+            max_pages=discovery.NEWEST_ARCHIVE_PAGES if ctx.newest_only else None)
         report.archive_index = index
         report.archive_count = len(archive_entries)
         if archive_entries:

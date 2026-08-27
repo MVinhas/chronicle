@@ -129,7 +129,8 @@ def cmd_sync(args) -> int:
 
     syncer = sync.Syncer(on_progress=report)
     result = syncer.sync_all(ids, fetch_content=not args.no_content,
-                             cache_images=not args.no_images)
+                             cache_images=not args.no_images,
+                             newest_only=args.newest)
     if result.error:
         print(f"\nError: {result.error}", file=sys.stderr)
         return 1
@@ -237,6 +238,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-content", action="store_true")
     s.add_argument("--no-images", action="store_true")
     s.add_argument("--rate", type=float, help="seconds between requests per host")
+    s.add_argument("--newest", action="store_true",
+                   help="fetch only posts newer than what is archived, instead "
+                        "of scanning each blog's whole history")
     s.set_defaults(fn=cmd_sync)
 
     sub.add_parser("stats", help="library overview").set_defaults(fn=cmd_stats)

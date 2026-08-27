@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import time
 from pathlib import Path
 
 import gi
@@ -44,6 +45,11 @@ class ReaderView(Gtk.Box):
     __gsignals__ = {
         "scrolled": (GObject.SignalFlags.RUN_FIRST, None, (float,)),
         "link-activated": (GObject.SignalFlags.RUN_FIRST, None, (str,)),
+        # Raised when the page wants a highlight's note edited; the window
+        # owns the dialog, because the reader has no toplevel of its own.
+        "note-requested": (GObject.SignalFlags.RUN_FIRST, None, (int,)),
+        # Something the reader wrote was stored; the library shows it.
+        "annotations-changed": (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
 
     def __init__(self):
@@ -146,8 +152,12 @@ class ReaderView(Gtk.Box):
         self._placeholder = None
         self._pending_scroll = scroll or 0.0
         self._last_scroll = self._pending_scroll
-        self.webview.load_html(style.build_document(article, self.dark),
-                               article["url"] or None)
+        conn = db.get_conn()
+        self.webview.load_html(
+            style.build_document(article, self.dark,
+                                 note=db.get_note(conn, article["id"]),
+                                 highlights=db.list_highlights(conn, article["id"])),
+            article["url"] or None)
 
     def show_placeholder(self, heading: str, body: str) -> None:
         self.article_id = None
@@ -200,9 +210,102 @@ class ReaderView(Gtk.Box):
                 payload = json.loads(payload)
         except (json.JSONDecodeError, TypeError):
             return
-        if payload.get("type") == "scroll":
+        kind = payload.get("type")
+        if kind == "scroll":
             self._last_scroll = float(payload.get("value") or 0.0)
             self.emit("scrolled", self._last_scroll)
+        elif kind in ("note", "highlight-add", "highlight-remove",
+                      "highlight-note", "anchors"):
+            self._on_annotation(kind, payload)
+
+    # -- annotations -------------------------------------------------------
+
+    def _on_annotation(self, kind: str, payload: dict) -> None:
+        """Apply one change the reading surface asked for.
+
+        Everything here is keyed on the article the reader is *currently*
+        showing rather than on anything the page sent: a message that arrives
+        as the next article loads must not write onto the wrong article.
+        """
+        if self.article_id is None:
+            return
+        conn = db.get_conn()
+        article_id = self.article_id
+
+        if kind == "note":
+            db.set_note(conn, article_id, payload.get("body") or "")
+            self.emit("annotations-changed")
+            return
+
+        if kind == "anchors":
+            # Where the page found each highlight after laying it over the
+            # text. Corrects drifted offsets and flags ones that vanished.
+            for entry in payload.get("anchors") or []:
+                try:
+                    hid = int(entry.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                offset = entry.get("offset")
+                db.reanchor_highlight(
+                    conn, hid, None if offset is None else int(offset))
+            return
+
+        if kind == "highlight-add":
+            quote = (payload.get("quote") or "").strip()
+            if not quote:
+                return
+            db.add_highlight(conn, article_id, quote,
+                             prefix=payload.get("prefix") or "",
+                             suffix=payload.get("suffix") or "",
+                             start_offset=int(payload.get("start_offset") or 0))
+            self._push_highlights()
+            self.emit("annotations-changed")
+            return
+
+        if kind == "highlight-remove":
+            try:
+                db.delete_highlight(conn, int(payload.get("id")))
+            except (TypeError, ValueError):
+                return
+            self._push_highlights()
+            self.emit("annotations-changed")
+            return
+
+        if kind == "highlight-note":
+            try:
+                self.emit("note-requested", int(payload.get("id")))
+            except (TypeError, ValueError):
+                pass
+
+    def _push_highlights(self) -> None:
+        """Re-send the stored highlights so the page shows what was saved."""
+        if self.article_id is None:
+            return
+        rows = db.list_highlights(db.get_conn(), self.article_id)
+        self._run_js(
+            f"window.chronicleSetHighlights({style.highlights_json(rows)});")
+
+    def flush_note(self, wait: bool = False) -> None:
+        """Commit a half-typed note before the reader moves on.
+
+        The page posts the text back over the script-message channel, which is
+        asynchronous. That is fine when navigating -- the message arrives a
+        moment later and lands on the right article, because the handler keys
+        on the article showing at the time. On the way out of the application
+        there may be no "moment later", so `wait` pumps the main loop briefly
+        to let the message be delivered before the process goes away.
+        """
+        self._run_js("window.chronicleFlushNote && window.chronicleFlushNote();")
+        if not wait:
+            return
+        deadline = time.monotonic() + 0.5
+        context = GLib.MainContext.default()
+        while time.monotonic() < deadline:
+            if not context.pending():
+                # Nothing left in flight; the note has either arrived or was
+                # never dirty in the first place.
+                break
+            context.iteration(False)
 
     def _on_policy(self, _view, decision, decision_type) -> bool:
         if decision_type != WebKit.PolicyDecisionType.NAVIGATION_ACTION:

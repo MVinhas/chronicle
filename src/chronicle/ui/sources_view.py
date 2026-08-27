@@ -28,7 +28,9 @@ class SourcesView(Gtk.Box):
     __gtype_name__ = "ChronicleSourcesView"
 
     __gsignals__ = {
-        "sync-requested": (GObject.SignalFlags.RUN_FIRST, None, (object,)),
+        # (source_ids or None, full_scan) — full_scan False means "fetch new
+        # posts": only what each blog has published since its last update.
+        "sync-requested": (GObject.SignalFlags.RUN_FIRST, None, (object, bool)),
         "cancel-requested": (GObject.SignalFlags.RUN_FIRST, None, ()),
         "library-changed": (GObject.SignalFlags.RUN_FIRST, None, ()),
     }
@@ -50,7 +52,7 @@ class SourcesView(Gtk.Box):
         self.scroller.set_child(clamp)
 
         # -- progress strip, shown only while a sync runs
-        self.progress_group = Adw.PreferencesGroup(title="Building the archive")
+        self.progress_group = Adw.PreferencesGroup(title="Updating")
         self.progress_label = Gtk.Label(xalign=0, wrap=True,
                                         css_classes=["dim-label", "caption"])
         self.progress_bar = Gtk.ProgressBar(show_text=False, margin_top=6)
@@ -77,10 +79,27 @@ class SourcesView(Gtk.Box):
         add = Gtk.Button(icon_name="list-add-symbolic", tooltip_text="Add a blog",
                          css_classes=["flat"])
         add.connect("clicked", lambda *_: self.open_add_dialog())
-        update = Gtk.Button(label="Update all", css_classes=["suggested-action"])
-        update.connect("clicked", lambda *_: self.emit("sync-requested", None))
+
+        # Two different jobs, so two buttons rather than one that sometimes
+        # takes four seconds and sometimes forty minutes. The cheap one is the
+        # routine action and gets the emphasis; the expensive one sits beside
+        # it, plainly labelled, because it is the one you reach for rarely.
+        fetch = Gtk.Button(label="Fetch new posts",
+                           tooltip_text="Get what these blogs have published "
+                                        "since their last update (F5)",
+                           css_classes=["suggested-action"])
+        fetch.connect("clicked", lambda *_: self.emit("sync-requested", None, False))
+
+        full = Gtk.Button(label="Full archive scan",
+                          tooltip_text="Re-examine every blog's whole history. "
+                                       "Slow — use it to fill gaps or after "
+                                       "adding a blog.",
+                          css_classes=["flat"])
+        full.connect("clicked", lambda *_: self.emit("sync-requested", None, True))
+
         actions.append(add)
-        actions.append(update)
+        actions.append(full)
+        actions.append(fetch)
         self.group.set_header_suffix(actions)
         self.content.append(self.group)
 
@@ -170,9 +189,15 @@ class SourcesView(Gtk.Box):
 
             sync_btn = Gtk.Button(icon_name="view-refresh-symbolic",
                                   valign=Gtk.Align.CENTER, css_classes=["flat"],
-                                  tooltip_text="Update this archive")
+                                  tooltip_text="Fetch this blog's new posts")
             sync_btn.connect("clicked", self._on_sync_one, src["id"])
             row.add_suffix(sync_btn)
+
+            scan_btn = Gtk.Button(icon_name="folder-download-symbolic",
+                                  valign=Gtk.Align.CENTER, css_classes=["flat"],
+                                  tooltip_text="Scan this blog's whole history")
+            scan_btn.connect("clicked", self._on_scan_one, src["id"])
+            row.add_suffix(scan_btn)
 
             remove = Gtk.Button(icon_name="user-trash-symbolic",
                                 valign=Gtk.Align.CENTER, css_classes=["flat"],
@@ -221,7 +246,10 @@ class SourcesView(Gtk.Box):
         return False
 
     def _on_sync_one(self, _btn, source_id) -> None:
-        self.emit("sync-requested", [source_id])
+        self.emit("sync-requested", [source_id], False)
+
+    def _on_scan_one(self, _btn, source_id) -> None:
+        self.emit("sync-requested", [source_id], True)
 
     def _on_rename(self, _btn, src) -> None:
         dialog = Adw.AlertDialog(
@@ -332,6 +360,8 @@ class SourcesView(Gtk.Box):
         title = f"Added {spec['name']} — via {spec['detected']}"
         toast = Adw.Toast(title=title, button_label="Build archive",
                           timeout=12 if spec.get("partial") else 8)
-        toast.connect("button-clicked", lambda *_: self.emit("sync-requested", None))
+        # A blog just added has no history at all, so this is the full scan.
+        toast.connect("button-clicked",
+                      lambda *_: self.emit("sync-requested", None, True))
         self.window.toasts.add_toast(toast)
         return False

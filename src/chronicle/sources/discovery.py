@@ -35,6 +35,10 @@ from .. import dates, htmlutil, net
 ARCHIVE_PATHS = ("/archive", "/archives", "/posts", "/all", "/blog",
                  "/writing", "/essays", "/articles", "/notes", "/")
 MAX_ARCHIVE_PAGES = 40
+# How far into an archive index "Fetch new posts" is willing to page.
+# Listings are newest-first, so anything published since the last update
+# is on the first page or two; paging deeper is the full scan's job.
+NEWEST_ARCHIVE_PAGES = 3
 MAX_FEED_PAGES = 25
 MAX_SITEMAP_CHILDREN = 50
 
@@ -341,7 +345,7 @@ def _collect_sitemap(xml: str, ctx, depth: int) -> list[str]:
 
 
 def read_archive(base: str, config: dict, ctx, in_scope,
-                 is_known=lambda url: False,
+                 is_known=lambda url: False, max_pages: int | None = None,
                  ) -> tuple[list[tuple[str, dates.PubDate]], str | None]:
     """Article links from the site's own archive/index pages and pagination.
 
@@ -350,6 +354,10 @@ def read_archive(base: str, config: dict, ctx, in_scope,
     all. Pagination is incremental: once a whole page's links are already in
     the library, the older pages cannot contain anything new, so the crawl
     stops there instead of re-walking the entire history every sync.
+
+    `max_pages` caps that pagination regardless of what it finds, which is how
+    "Fetch new posts" keeps a routine update to a handful of requests even on
+    a site whose listing carries no dates for the incremental stop to use.
     """
     if config.get("index") == "":
         return [], None   # looked before: this site keeps no archive index
@@ -365,7 +373,9 @@ def read_archive(base: str, config: dict, ctx, in_scope,
             seen.setdefault(u, h)
         # Numbered pagination first (also covers JS "load more" buttons whose
         # numbered pages are still served), then the ?paged= fallback.
-        for page in range(2, MAX_ARCHIVE_PAGES + 1):
+        limit = MAX_ARCHIVE_PAGES if max_pages is None else min(
+            MAX_ARCHIVE_PAGES, max(1, max_pages))
+        for page in range(2, limit + 1):
             ctx.check()
             more = _links_from(f"{base}{path.rstrip('/')}/page/{page}/", base)
             if not more:

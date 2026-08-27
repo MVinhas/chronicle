@@ -194,6 +194,13 @@ class LibraryView(Gtk.Box):
                         ("s" if row["image_count"] != 1 else ""))
         if row["content_status"] == "paywalled":
             bits.append("partial — paywalled")
+        # What the reader left behind, so an annotated article is findable in
+        # the queue without opening it.
+        marks = row["highlight_count"] or 0
+        if marks:
+            bits.append(f"{marks} highlight" + ("s" if marks != 1 else ""))
+        if row["note_count"]:
+            bits.append("noted")
         meta.set_label("  ·  ".join(bits))
 
         star.set_visible(bool(row["favourite_at"]))

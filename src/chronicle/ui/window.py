@@ -90,7 +90,8 @@ class MainWindow(Adw.ApplicationWindow):
         theme_menu.append("Dark", "win.theme::dark")
 
         menu = Gio.Menu()
-        menu.append("Update archive", "win.sync")
+        menu.append("Fetch new posts", "win.sync")
+        menu.append("Full archive scan", "win.full-scan")
         menu.append("Open original in browser", "win.open-external")
         menu.append_section("Appearance", theme_menu)
         extras = Gio.Menu()
@@ -101,7 +102,7 @@ class MainWindow(Adw.ApplicationWindow):
                                             menu_model=menu, tooltip_text="Menu"))
 
         self.sync_button = Gtk.Button(icon_name="view-refresh-symbolic",
-                                      tooltip_text="Update archive (F5)",
+                                      tooltip_text="Fetch new posts (F5)",
                                       action_name="win.sync")
         self.header.pack_start(self.sync_button)
 
@@ -127,6 +128,9 @@ class MainWindow(Adw.ApplicationWindow):
         self.reader = ReaderView()
         self.reader.connect("scrolled", self._on_scrolled)
         self.reader.connect("link-activated", self._on_link)
+        self.reader.connect("note-requested", self._on_highlight_note)
+        self.reader.connect("annotations-changed",
+                            lambda *_: self.refresh_library())
 
         view = Adw.ToolbarView()
         view.set_content(self.reader)
@@ -200,6 +204,7 @@ class MainWindow(Adw.ApplicationWindow):
             ("sources", lambda *_: self.show_page("sources"), ["<Control>2"], []),
             ("search", self.focus_search, ["<Control>f"], ["slash"]),
             ("sync", self.start_sync, ["F5", "<Control>r"], []),
+            ("full-scan", self.start_full_scan, ["<Shift>F5"], []),
             ("open-external", self.open_external, ["<Control>o"], []),
             ("scroll-down", lambda *_: self.reader.scroll_by_page(1), [], ["space"]),
             ("scroll-up", lambda *_: self.reader.scroll_by_page(-1), [], ["<Shift>space"]),
@@ -491,7 +496,43 @@ class MainWindow(Adw.ApplicationWindow):
     def _flush_scroll(self) -> None:
         if self.current is not None:
             db.set_scroll(self._conn, self.current["id"], self._scroll_frac)
+            # A note being typed when the reader moves on is committed by the
+            # page itself; asking for it here means the keystroke that
+            # navigates away cannot lose the sentence in progress.
+            self.reader.flush_note()
         self._scroll_frac = 0.0
+
+    # -- annotations -------------------------------------------------------
+
+    def _on_highlight_note(self, _reader, highlight_id: int) -> None:
+        """Attach or edit the note on one highlight."""
+        rows = [r for r in db.list_highlights(self._conn, self.current["id"])
+                if r["id"] == highlight_id] if self.current else []
+        if not rows:
+            return
+        row = rows[0]
+        quote = row["quote"]
+        dialog = Adw.AlertDialog(
+            heading="Note on this highlight",
+            body=f"“{quote[:180]}{'…' if len(quote) > 180 else ''}”")
+        entry = Gtk.Entry(text=row["note"] or "", activates_default=True,
+                          placeholder_text="What did you want to remember?")
+        dialog.set_extra_child(entry)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("save", "Save")
+        dialog.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("save")
+
+        def done(_d, response):
+            if response != "save":
+                return
+            db.set_highlight_note(self._conn, highlight_id, entry.get_text())
+            self.reader._push_highlights()
+            self.refresh_library()
+
+        dialog.connect("response", done)
+        dialog.present(self)
+        entry.grab_focus()
 
     def _on_article_chosen(self, _view, article_id: int) -> None:
         self._flush_scroll()
@@ -507,17 +548,23 @@ class MainWindow(Adw.ApplicationWindow):
     # -- syncing -----------------------------------------------------------
 
     def start_sync(self, *_):
-        self._on_sync_requested(None, None)
+        """F5: the routine update — what the blogs published since last time."""
+        self._on_sync_requested(None, None, False)
 
-    def _on_sync_requested(self, _widget, source_ids) -> None:
+    def start_full_scan(self, *_):
+        self._on_sync_requested(None, None, True)
+
+    def _on_sync_requested(self, _widget, source_ids, full_scan: bool) -> None:
         if self.syncer.running:
             self.toasts.add_toast(Adw.Toast(title="An update is already running",
                                             timeout=3))
             return
         self.sync_button.set_sensitive(False)
         self.show_page("sources")
-        threading.Thread(target=self.syncer.sync_all, args=(source_ids,),
-                         daemon=True).start()
+        threading.Thread(
+            target=self.syncer.sync_all,
+            args=(source_ids,), kwargs={"newest_only": not full_scan},
+            daemon=True).start()
 
     def _on_sync_progress(self, prog) -> None:
         GLib.idle_add(self._apply_progress, prog)
@@ -555,7 +602,8 @@ class MainWindow(Adw.ApplicationWindow):
             ("Mark read / unread", "R"),
             ("Library", "L / Esc"),
             ("Search", "Ctrl+F or /"),
-            ("Update archive", "F5"),
+            ("Fetch new posts", "F5"),
+            ("Full archive scan", "Shift+F5"),
             ("Hide / show read articles", "H"),
             ("Switch theme", "Ctrl+T"),
             ("Open original", "Ctrl+O"),
@@ -584,6 +632,9 @@ class MainWindow(Adw.ApplicationWindow):
     # -- shutdown ----------------------------------------------------------
 
     def do_close_request(self) -> bool:
+        # On the way out the page's reply has to be waited for: there is no
+        # later main-loop turn in which to deliver it.
+        self.reader.flush_note(wait=True)
         self._flush_scroll()
         if self.syncer.running:
             self.syncer.cancel()

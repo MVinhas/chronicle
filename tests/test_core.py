@@ -427,3 +427,105 @@ class TestPaulGraham(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestAnnotations(unittest.TestCase):
+    """Notes and highlights: the one part of the library the reader wrote."""
+
+    def setUp(self):
+        from chronicle import db
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.db = db
+        self.conn = db.connect(self.tmp.name)
+        db.init(self.conn)
+        self.sid = db.add_source(self.conn, "t", "Test", "generic",
+                                 "https://t.example")
+        self.aid, _ = db.upsert_article(
+            self.conn, self.sid, "a", url="https://t.example/a", title="A",
+            published_at="2010-01-01T00:00:00", date_precision="day",
+            date_confidence="exact", date_source="test")
+        self.conn.execute(
+            "UPDATE articles SET content_status='ok', content_html='<p>x</p>' "
+            "WHERE id=?", (self.aid,))
+
+    def tearDown(self):
+        self.conn.close()
+        os.unlink(self.tmp.name)
+
+    def test_note_roundtrips(self):
+        self.db.set_note(self.conn, self.aid, "  worth rereading  ")
+        self.assertEqual(self.db.get_note(self.conn, self.aid), "worth rereading")
+
+    def test_emptying_a_note_removes_it(self):
+        self.db.set_note(self.conn, self.aid, "something")
+        self.db.set_note(self.conn, self.aid, "   ")
+        self.assertEqual(self.db.get_note(self.conn, self.aid), "")
+        self.assertEqual(self.db.annotation_counts(self.conn, self.aid), (0, False))
+
+    def test_highlights_are_listed_in_reading_order(self):
+        self.db.add_highlight(self.conn, self.aid, "second", start_offset=90)
+        self.db.add_highlight(self.conn, self.aid, "first", start_offset=10)
+        quotes = [r["quote"] for r in self.db.list_highlights(self.conn, self.aid)]
+        self.assertEqual(quotes, ["first", "second"])
+
+    def test_orphans_sort_after_anchored_highlights(self):
+        """A highlight whose words are gone is kept, but out of the way."""
+        lost = self.db.add_highlight(self.conn, self.aid, "gone", start_offset=5)
+        self.db.add_highlight(self.conn, self.aid, "here", start_offset=50)
+        self.db.reanchor_highlight(self.conn, lost, None)
+        rows = self.db.list_highlights(self.conn, self.aid)
+        self.assertEqual([r["quote"] for r in rows], ["here", "gone"])
+        self.assertIsNotNone(rows[1]["orphaned_at"])
+
+    def test_reanchoring_clears_an_earlier_orphan_flag(self):
+        """Re-fetching an article can bring back words a previous fetch lost."""
+        hid = self.db.add_highlight(self.conn, self.aid, "q", start_offset=5)
+        self.db.reanchor_highlight(self.conn, hid, None)
+        self.db.reanchor_highlight(self.conn, hid, 42)
+        row = self.db.list_highlights(self.conn, self.aid)[0]
+        self.assertIsNone(row["orphaned_at"])
+        self.assertEqual(row["start_offset"], 42)
+
+    def test_annotations_survive_a_content_refetch(self):
+        """The whole point of quote-anchoring: a re-sync must not erase notes."""
+        self.db.add_highlight(self.conn, self.aid, "a memorable line")
+        self.db.set_note(self.conn, self.aid, "my thoughts")
+        self.db.update_content(self.conn, self.aid, "<p>completely rewritten</p>",
+                               status="ok", source="direct", word_count=2,
+                               image_count=0, excerpt="", content_hash="new")
+        self.assertEqual(self.db.annotation_counts(self.conn, self.aid), (1, True))
+        self.assertEqual(self.db.get_note(self.conn, self.aid), "my thoughts")
+
+    def test_deleting_an_article_takes_its_annotations(self):
+        self.db.add_highlight(self.conn, self.aid, "q")
+        self.db.set_note(self.conn, self.aid, "n")
+        self.db.delete_source(self.conn, self.sid)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) c FROM highlights").fetchone()["c"], 0)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) c FROM notes").fetchone()["c"], 0)
+
+    def test_queue_reports_annotation_counts(self):
+        self.db.add_highlight(self.conn, self.aid, "one")
+        self.db.add_highlight(self.conn, self.aid, "two")
+        self.db.set_note(self.conn, self.aid, "note")
+        row = self.db.queue(self.conn)[0]
+        self.assertEqual(row["highlight_count"], 2)
+        self.assertEqual(row["note_count"], 1)
+
+
+class TestHighlightPayload(unittest.TestCase):
+    """The JSON handed to the reading surface."""
+
+    def test_script_terminator_in_a_quote_cannot_break_out(self):
+        from chronicle.ui import style
+
+        class Row(dict):
+            def __getitem__(self, k):
+                return dict.get(self, k)
+
+        payload = style.highlights_json([Row({
+            "id": 1, "quote": "</script><img onerror=x>", "prefix": "",
+            "suffix": "", "start_offset": 0, "note": ""})])
+        self.assertNotIn("</script>", payload)

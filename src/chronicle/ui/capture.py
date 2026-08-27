@@ -177,6 +177,42 @@ def capture_window(window: Gtk.Window, path: str | Path) -> bool:
     return True
 
 
+def capture_reader(window, path: str | Path, done) -> bool:
+    """Capture the reading surface through WebKit's own renderer.
+
+    `Gtk.WidgetPaintable` snapshots the widget tree, and for a WebView that
+    yields whatever texture the web process last handed the compositor. In
+    practice a page that has just relaid out comes back with its text missing
+    -- the marks and rules paint, the glyphs do not -- which looks exactly
+    like a rendering bug in the page itself. Asking WebKit for the snapshot
+    instead goes to the process that actually knows how to paint it.
+    """
+    reader = getattr(window, "reader", None)
+    view = getattr(reader, "webview", None)
+    if view is None:
+        return False
+
+    def finished(obj, res, _user):
+        try:
+            texture = obj.get_snapshot_finish(res)
+            out = Path(path)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            texture.save_to_png(str(out))
+            log.info("captured the reading surface to %s", out)
+        except Exception:                             # noqa: BLE001
+            log.exception("webkit snapshot failed")
+        done()
+
+    try:
+        from gi.repository import WebKit
+        view.get_snapshot(WebKit.SnapshotRegion.FULL_DOCUMENT,
+                          WebKit.SnapshotOptions.NONE, None, finished, None)
+    except Exception:                                 # noqa: BLE001
+        log.exception("webkit snapshot unavailable")
+        return False
+    return True
+
+
 def arm(window) -> None:
     """Schedule a capture if the environment asked for one."""
     if not enabled():
@@ -215,13 +251,20 @@ def arm(window) -> None:
                 window.get_application().quit()
         return False
 
+    def quit_later() -> None:
+        if should_quit:
+            GLib.timeout_add(200, lambda: window.get_application().quit() or False)
+
     def finish() -> bool:
         try:
+            # The reader is a WebView, and only WebKit can render it reliably;
+            # the other pages are ordinary widgets, which GSK renders fine.
+            if page == "reader" and capture_reader(window, out, quit_later):
+                return False
             capture_window(window, out)
         except Exception:                             # noqa: BLE001
             log.exception("capture failed")
-        if should_quit:
-            GLib.timeout_add(200, lambda: window.get_application().quit() or False)
+        quit_later()
         return False
 
     GLib.timeout_add(int(delay * 1000), run)

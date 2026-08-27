@@ -79,7 +79,16 @@ class Syncer:
     # -- entry points ------------------------------------------------------
 
     def sync_all(self, source_ids: list[int] | None = None,
-                 fetch_content: bool = True, cache_images: bool = True) -> Progress:
+                 fetch_content: bool = True, cache_images: bool = True,
+                 newest_only: bool = False) -> Progress:
+        """Build or update the archive.
+
+        `newest_only` is the routine update: enumerate only the routes that
+        list the newest posts first and stop where they meet what is already
+        archived, rather than re-examining a site's whole history. It is a
+        cost decision, not a correctness one -- anything it does find is
+        recorded exactly as a full scan would record it.
+        """
         with self._lock:
             if self._running:
                 return Progress(message="A sync is already running", done=True)
@@ -95,7 +104,8 @@ class Syncer:
             for row in rows:
                 if self.should_stop():
                     break
-                self._sync_source(conn, row, prog, fetch_content, cache_images)
+                self._sync_source(conn, row, prog, fetch_content, cache_images,
+                                  newest_only)
             prog.done = True
             prog.message = ("Stopped" if self.should_stop()
                             else f"Archive up to date — {prog.new} new, "
@@ -113,7 +123,7 @@ class Syncer:
     # -- per source --------------------------------------------------------
 
     def _sync_source(self, conn, row, prog: Progress, fetch_content: bool,
-                     cache_images: bool) -> None:
+                     cache_images: bool, newest_only: bool = False) -> None:
         prog.source = row["name"]
         self._say(prog, f"Starting {row['name']}…")
         try:
@@ -148,6 +158,15 @@ class Syncer:
                 "FROM articles WHERE source_id=?", (row["id"],))
         }
 
+        # The newest date already archived, so a cheap enumeration knows when
+        # it has reached settled ground. A source with nothing archived yet has
+        # no such floor, and gets a full scan whatever was asked for -- there
+        # is no "new since" without a "since".
+        newest_known = conn.execute(
+            "SELECT MAX(published_at) m FROM articles WHERE source_id=?",
+            (row["id"],)).fetchone()["m"]
+        incremental = bool(newest_only and newest_known)
+
         new_rejects: list[str] = []
         ctx = Context(
             progress=lambda msg, frac=None: self._say(prog, msg, frac),
@@ -156,6 +175,8 @@ class Syncer:
             known=known,
             rejected=db.rejected_guids(conn, row["id"]),
             reject=new_rejects.append,
+            newest_only=incremental,
+            newest_known=newest_known,
         )
 
         discovered = 0
@@ -211,16 +232,23 @@ class Syncer:
         if fetch_content and not self.should_stop():
             # Also pick up anything left unfetched by earlier runs — a stub
             # for it may not have been yielded this time at all.
-            have = {item[0] for item in pending}
-            for r in db.pending_content(conn, row["id"]):
-                if r["id"] not in have:
-                    pending.append((r["id"], r["url"], None, None, {}))
+            #
+            # Not in "fetch new posts" mode, though: a half-built archive can
+            # hold thousands of pending bodies, and draining them is exactly
+            # the long job the user asked to skip. They are not lost, only
+            # deferred to the next full scan.
+            if not incremental:
+                have = {item[0] for item in pending}
+                for r in db.pending_content(conn, row["id"]):
+                    if r["id"] not in have:
+                        pending.append((r["id"], r["url"], None, None, {}))
             self._fetch_bodies(conn, source, ctx, row, pending, prog, cache_images)
 
         status = "stopped" if self.should_stop() else "ok"
         note = f" — {ctx.result_note}" if ctx.result_note else ""
+        kind = "new posts" if incremental else "full scan"
         db.mark_sync(conn, row["id"], status,
-                     f"{discovered} examined, {prog.new} new{note}")
+                     f"{kind}: {discovered} examined, {prog.new} new{note}")
 
     def _redetect(self, conn, row, config, prog: Progress):
         """Re-run detection for a source whose stored route is obsolete.

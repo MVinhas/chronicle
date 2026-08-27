@@ -50,11 +50,11 @@ order:
 flatpak install flathub io.github.mvinhas.Chronicle
 ```
 
-Then open **Blogs**, paste in a blog address, and press **Update all**.
+Then open **Blogs**, paste in a blog address, and press **Full archive scan**.
 
 The first run takes a while — it's fetching a blog's entire history, and it
 goes slowly on purpose so as not to hammer anyone's website. After that,
-updates only pick up what's new.
+**Fetch new posts** picks up only what's appeared since, which takes seconds.
 
 <div align="center">
   <img src="data/screenshots/library.png" width="90%" alt="The reading queue">
@@ -75,10 +75,35 @@ It remembers where you got to.
 | `L` / `Esc` | back to the list |
 | `Ctrl+F` | search |
 | `Ctrl+T` | light / dark theme |
-| `F5` | fetch new articles |
+| `F5` | fetch new posts |
+| `Shift+F5` | full archive scan |
 
 Articles are stored on your machine, images included, so everything keeps
 working offline.
+
+## Notes and highlights
+
+Select any passage while you're reading to highlight it, and click a highlight
+to attach a note to it. There's also a note box at the foot of every article
+for anything you want to say about the piece as a whole.
+
+Highlights are anchored to the words themselves rather than to a position in
+the file, so they stay put when a blog edits a post or Chronicle re-fetches it.
+If the text a highlight marked really does disappear, the highlight is kept and
+listed as no longer present rather than quietly thrown away.
+
+All of it stays on your machine, and an archive update never overwrites it.
+
+## Keeping up to date
+
+Two different jobs, so two buttons:
+
+- **Fetch new posts** — what each blog has published since the last update. It
+  reads the routes that list newest-first and stops as soon as it reaches what
+  you already have, so it's a matter of seconds. This is `F5`, and what you
+  want almost every time.
+- **Full archive scan** — re-examines each blog's whole history. Slow. Use it
+  after adding a blog, or to fill in gaps.
 
 ## A blog isn't working properly?
 

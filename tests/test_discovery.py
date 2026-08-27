@@ -26,8 +26,8 @@ _REAL_CONNECT = db.connect
 
 
 def run_sync(fn: FakeNet, dbfile: str, spec: dict | None = None,
-             url: str = BASE) -> sync.Progress:
-    """detect() + add + full sync against the fake net, on a shared temp DB."""
+             url: str = BASE, newest_only: bool = False) -> sync.Progress:
+    """detect() + add + sync against the fake net, on a shared temp DB."""
     with fn.patched():
         if spec is None:
             spec = detect(url)
@@ -38,7 +38,11 @@ def run_sync(fn: FakeNet, dbfile: str, spec: dict | None = None,
         conn.close()
         with mock.patch.object(db, "connect",
                                lambda path=None: _REAL_CONNECT(dbfile)):
-            return sync.Syncer().sync_all(cache_images=False)
+            return sync.Syncer().sync_all(cache_images=False,
+                                          newest_only=newest_only)
+
+
+RESYNC = {"name": "B", "plugin": "generic", "homepage": BASE, "config": {}}
 
 
 class SyncHarness(unittest.TestCase):
@@ -651,3 +655,95 @@ class TestContextHelpers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestFetchNewPosts(SyncHarness):
+    """"Fetch new posts" vs "Full archive scan".
+
+    The contract is about *cost*, not about correctness: the cheap mode may
+    look at less of a site, but anything it does find must be recorded exactly
+    as the full scan would record it, and it must never lose what is stored.
+    """
+
+    def _site(self, n=5):
+        fn = FakeNet()
+        posts = _add_posts(fn, n)
+        fn.add(f"{BASE}/sitemap.xml", sitemap_xml(posts))
+        fn.add(BASE + "/", "<html><title>B</title></html>")
+        return fn, posts
+
+    def test_skips_the_sitemap_once_there_is_an_archive(self):
+        """The completeness route is the expensive one, and cannot stop early."""
+        fn, _ = self._site()
+        run_sync(fn, self.dbfile)
+        fn.requests.clear()
+        run_sync(fn, self.dbfile, spec=RESYNC, newest_only=True)
+        self.assertEqual(fn.count("sitemap"), 0)
+
+    def test_full_scan_still_reads_the_sitemap(self):
+        fn, _ = self._site()
+        run_sync(fn, self.dbfile)
+        fn.requests.clear()
+        run_sync(fn, self.dbfile, spec=RESYNC, newest_only=False)
+        self.assertGreater(fn.count("sitemap"), 0)
+
+    def test_an_empty_archive_gets_a_full_scan_regardless(self):
+        """There is no "new since" without a "since"."""
+        fn, _ = self._site()
+        prog = run_sync(fn, self.dbfile, newest_only=True)
+        self.assertEqual(len(self.urls()), 5)
+        self.assertEqual(prog.new, 5)
+
+    def test_finds_a_new_post_through_the_feed(self):
+        """The feed is the route that carries what is new, so it still runs."""
+        fn = FakeNet()
+        posts = _add_posts(fn, 4)
+        fn.add(f"{BASE}/sitemap.xml", sitemap_xml(posts))
+        fn.add(BASE + "/", "<html><title>B</title></html>")
+        # A feed that exists from the outset: a site proven feedless on one
+        # sync is deliberately not re-probed on the next.
+        def feed_with(items):
+            return rss_xml(BASE, [
+                {"title": t, "link": u, "date": d} for t, u, d in items])
+        fn.add(f"{BASE}/feed", feed_with(
+            [("Post 0", posts[0], "Sat, 05 Jan 2019 00:00:00 +0000")]))
+        run_sync(fn, self.dbfile)
+
+        new = f"{BASE}/2021/03/fresh/"
+        fn.add(new, post_html("Fresh", "2021-03-02T00:00:00+00:00"))
+        fn.add(f"{BASE}/feed", feed_with(
+            [("Fresh", new, "Tue, 02 Mar 2021 00:00:00 +0000"),
+             ("Post 0", posts[0], "Sat, 05 Jan 2019 00:00:00 +0000")]))
+        prog = run_sync(fn, self.dbfile, spec=RESYNC, newest_only=True)
+        self.assertEqual(prog.new, 1)
+        self.assertIn(new, [r["url"] for r in self.urls()])
+
+    def test_costs_less_than_a_full_scan(self):
+        fn, _ = self._site(6)
+        run_sync(fn, self.dbfile)
+
+        fn.requests.clear()
+        run_sync(fn, self.dbfile, spec=RESYNC, newest_only=True)
+        cheap = len(fn.requests)
+
+        fn.requests.clear()
+        run_sync(fn, self.dbfile, spec=RESYNC, newest_only=False)
+        full = len(fn.requests)
+
+        self.assertLess(cheap, full)
+
+    def test_never_drops_what_is_already_archived(self):
+        fn, _ = self._site(6)
+        run_sync(fn, self.dbfile)
+        before = {r["url"] for r in self.urls()}
+        run_sync(fn, self.dbfile, spec=RESYNC, newest_only=True)
+        self.assertEqual({r["url"] for r in self.urls()}, before)
+
+    def test_the_mode_is_recorded_on_the_source(self):
+        fn, _ = self._site()
+        run_sync(fn, self.dbfile)
+        run_sync(fn, self.dbfile, spec=RESYNC, newest_only=True)
+        c = self.conn()
+        msg = c.execute("SELECT last_sync_message m FROM sources").fetchone()["m"]
+        c.close()
+        self.assertTrue(msg.startswith("new posts:"), msg)

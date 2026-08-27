@@ -62,6 +62,19 @@ class Context:
     # A one-line summary the source may leave behind ("sitemap 138, feed 10 —
     # 142 unique"); recorded as the sync result the user sees.
     result_note: str = ""
+    # "Fetch new posts" rather than a full archive scan: enumerate only the
+    # routes that put the newest posts first (the feed, the front of the
+    # archive index) and stop as soon as they run into what is already
+    # archived. The expensive completeness routes -- the whole sitemap, deep
+    # archive pagination -- are skipped. A source that cannot enumerate
+    # cheaply may ignore this and do its normal pass; correctness never
+    # depends on the flag, only cost.
+    newest_only: bool = False
+    # Publication date of the newest article already archived for this source,
+    # as naive-UTC ISO, or None when the archive is empty. In newest_only mode
+    # a candidate older than this is already accounted for, so enumeration can
+    # stop rather than walk back through the whole history.
+    newest_known: str | None = None
 
     def check(self) -> None:
         if self.should_stop():
@@ -88,6 +101,19 @@ class Context:
         if not k or not k[0]:
             return -1
         return k[2] if len(k) > 2 else 0
+
+    def predates_archive(self, date) -> bool:
+        """In newest_only mode, is this date older than everything we hold?
+
+        Only ever True when a real comparison is possible: with no archive
+        yet, or an undated candidate, the answer is False and the candidate
+        is considered. A cheap enumeration must never *drop* an article on
+        this test -- it only uses it to decide when it can stop early.
+        """
+        if not self.newest_only or not self.newest_known:
+            return False
+        return bool(date is not None and getattr(date, "known", False)
+                    and date.iso is not None and date.iso < self.newest_known)
 
 
 class Cancelled(Exception):

@@ -15,7 +15,7 @@ from typing import Any, Iterable, Sequence
 
 from . import paths
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -99,6 +99,41 @@ CREATE TABLE IF NOT EXISTS discovery_rejects (
     seen_at   TEXT NOT NULL,
     epoch     INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (source_id, guid)
+);
+
+-- Notes and highlights the reader leaves on an article.
+--
+-- A highlight is anchored by *quote plus offset*, not by offset alone: the
+-- stored `quote` is the authority and `start_offset` only a hint at where to
+-- look for it. Re-fetching an article can rewrite content_html (a publisher
+-- edit, a better extractor), which would silently move every raw offset; the
+-- quote lets the anchor re-locate itself instead. `prefix`/`suffix` carry the
+-- surrounding text so a quote occurring several times still lands on the right
+-- occurrence.
+--
+-- Offsets index the article's *plain text* -- the concatenated text nodes of
+-- the rendered prose -- so they survive markup-only changes to the HTML.
+CREATE TABLE IF NOT EXISTS highlights (
+    id           INTEGER PRIMARY KEY,
+    article_id   INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+    quote        TEXT NOT NULL,
+    prefix       TEXT NOT NULL DEFAULT '',
+    suffix       TEXT NOT NULL DEFAULT '',
+    start_offset INTEGER NOT NULL DEFAULT 0,
+    note         TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL,
+    -- Set when the quote could no longer be found in the article text. The
+    -- row is kept, not deleted: the words the reader marked are still theirs
+    -- to read back, even when the article they came from has moved on.
+    orphaned_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_highlights_article ON highlights (article_id);
+
+-- One free-text note per article, shown at the foot of the reading surface.
+CREATE TABLE IF NOT EXISTS notes (
+    article_id INTEGER PRIMARY KEY REFERENCES articles(id) ON DELETE CASCADE,
+    body       TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS app_state (
@@ -430,7 +465,9 @@ QUEUE_SELECT = """
 SELECT a.id, a.title, a.url, a.published_at, a.date_precision, a.date_confidence,
        a.date_source, a.excerpt, a.word_count, a.image_count, a.content_status,
        a.source_id, s.name AS source_name, s.slug AS source_slug,
-       r.read_at, r.favourite_at, r.scroll_pos
+       r.read_at, r.favourite_at, r.scroll_pos,
+       (SELECT COUNT(*) FROM highlights h WHERE h.article_id = a.id) AS highlight_count,
+       (SELECT COUNT(*) FROM notes n WHERE n.article_id = a.id) AS note_count
 FROM articles a
 JOIN sources s ON s.id = a.source_id
 LEFT JOIN reading_state r ON r.article_id = a.id
@@ -626,3 +663,90 @@ def stats(conn) -> dict:
         "WHERE published_at IS NOT NULL").fetchone()
     return {"articles": a, "with_content": ok, "images": im["c"],
             "image_bytes": im["b"], "oldest": rng["a"], "newest": rng["b"]}
+
+
+# --------------------------------------------------------------------------
+# notes and highlights
+#
+# The reader's own marginalia. Unlike everything above, none of it comes from
+# the network: it is the one part of the library the user wrote, so it is
+# never overwritten by a sync and never dropped when an article is refetched.
+# --------------------------------------------------------------------------
+
+def get_note(conn, article_id: int) -> str:
+    row = conn.execute("SELECT body FROM notes WHERE article_id=?",
+                       (article_id,)).fetchone()
+    return row["body"] if row else ""
+
+
+def set_note(conn, article_id: int, body: str) -> None:
+    """Store an article's note, or clear it when the text is emptied."""
+    body = (body or "").strip()
+    if not body:
+        conn.execute("DELETE FROM notes WHERE article_id=?", (article_id,))
+        return
+    conn.execute(
+        "INSERT INTO notes(article_id, body, updated_at) VALUES(?,?,?) "
+        "ON CONFLICT(article_id) DO UPDATE SET body=excluded.body, "
+        "updated_at=excluded.updated_at",
+        (article_id, body, utcnow()))
+
+
+def list_highlights(conn, article_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM highlights WHERE article_id=? "
+        "ORDER BY orphaned_at IS NOT NULL, start_offset, id",
+        (article_id,)).fetchall()
+
+
+def add_highlight(conn, article_id: int, quote: str, *, prefix: str = "",
+                  suffix: str = "", start_offset: int = 0,
+                  note: str = "") -> int:
+    cur = conn.execute(
+        "INSERT INTO highlights(article_id, quote, prefix, suffix, "
+        "start_offset, note, created_at) VALUES(?,?,?,?,?,?,?)",
+        (article_id, quote, prefix, suffix, max(0, int(start_offset)), note,
+         utcnow()))
+    return cur.lastrowid
+
+
+def delete_highlight(conn, highlight_id: int) -> None:
+    conn.execute("DELETE FROM highlights WHERE id=?", (highlight_id,))
+
+
+def set_highlight_note(conn, highlight_id: int, note: str) -> None:
+    conn.execute("UPDATE highlights SET note=? WHERE id=?",
+                 ((note or "").strip(), highlight_id))
+
+
+def reanchor_highlight(conn, highlight_id: int, start_offset: int | None) -> None:
+    """Record where a highlight was re-found, or that it could not be.
+
+    Called by the reader after it has laid the highlights over the rendered
+    text. An orphan keeps its row -- the words the reader marked are still
+    theirs -- and is listed apart from the ones still anchored in the prose.
+    """
+    if start_offset is None:
+        conn.execute(
+            "UPDATE highlights SET orphaned_at=? WHERE id=? AND orphaned_at IS NULL",
+            (utcnow(), highlight_id))
+    else:
+        conn.execute(
+            "UPDATE highlights SET start_offset=?, orphaned_at=NULL WHERE id=?",
+            (max(0, int(start_offset)), highlight_id))
+
+
+def annotation_counts(conn, article_id: int) -> tuple[int, bool]:
+    """(number of highlights, whether a note exists) for one article."""
+    n = conn.execute("SELECT COUNT(*) c FROM highlights WHERE article_id=?",
+                     (article_id,)).fetchone()["c"]
+    has_note = conn.execute("SELECT 1 FROM notes WHERE article_id=?",
+                            (article_id,)).fetchone() is not None
+    return n, has_note
+
+
+def annotated_article_ids(conn) -> set[int]:
+    """Every article carrying a note or a highlight."""
+    rows = conn.execute(
+        "SELECT article_id FROM highlights UNION SELECT article_id FROM notes")
+    return {r["article_id"] for r in rows}

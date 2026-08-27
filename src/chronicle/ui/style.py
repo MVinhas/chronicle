@@ -13,6 +13,7 @@ desktop preference.
 from __future__ import annotations
 
 import html as _html
+import json as _json
 
 from .. import dates
 
@@ -67,6 +68,9 @@ READER_CSS = FONT_FACES + """
   --link-rule:  rgba(122, 75, 42, 0.40);
   --notice-bg:  #f7f3ec;
   --select:     #e8dcc8;
+  --marker:     rgba(233, 196, 106, 0.42);
+  --marker-on:  rgba(233, 196, 106, 0.72);
+  --marker-rule: #c9a227;
   --img-fade:   none;
   --measure:    34rem;
   --serif: 'Source Serif 4', 'Noto Serif', 'Liberation Serif', Georgia, serif;
@@ -86,6 +90,11 @@ html.dark {
   --link-rule:  rgba(201, 160, 119, 0.45);
   --notice-bg:  #232019;
   --select:     #4a3f2c;
+  /* A wash rather than a block: dark-theme prose is light on dark, and an
+     opaque marker would invert the text it is meant to emphasise. */
+  --marker:     rgba(201, 160, 119, 0.26);
+  --marker-on:  rgba(201, 160, 119, 0.46);
+  --marker-rule: #c9a077;
   /* Take the glare off pure-white diagrams and screenshots. */
   --img-fade:   brightness(0.88) contrast(1.02);
 }
@@ -350,6 +359,130 @@ caption {
 
 ::selection { background: var(--select); }
 
+/* ---- highlights and notes ---------------------------------------------- */
+
+/* Painted as a background wash on a plain <mark>, so the text itself keeps
+   its own colour and weight and the prose reads exactly as it did before. */
+mark.hl {
+  background: var(--marker);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0.04em 0.02em;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+mark.hl:hover { background: var(--marker-on); }
+mark.hl.has-note {
+  box-shadow: inset 0 -0.14em 0 var(--marker-rule);
+}
+
+/* The floating control offered when text is selected, and when a highlight
+   is clicked. Positioned by script, in document coordinates. */
+#hl-pop {
+  position: absolute;
+  z-index: 40;
+  display: none;
+  font-family: var(--sans);
+  font-size: 0.66rem;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.16);
+  padding: 3px;
+  white-space: nowrap;
+}
+#hl-pop button {
+  font: inherit;
+  color: var(--ink);
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  padding: 0.42em 0.7em;
+  cursor: pointer;
+}
+#hl-pop button:hover { background: var(--code-bg); }
+
+/* ---- the reader's own note, at the foot of the article ------------------ */
+
+.notes {
+  margin: 3.2rem 0 0;
+  padding-top: 1.6rem;
+  border-top: 1px solid var(--rule);
+}
+
+.notes h2 {
+  font-family: var(--sans);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0 0 1rem;
+}
+
+/* A real textarea rather than a contenteditable: plain text in, plain text
+   out, with none of contenteditable's pasted-markup surprises. */
+#note-body {
+  display: block;
+  width: 100%;
+  min-height: 5.2rem;
+  resize: vertical;
+  font-family: var(--serif);
+  font-size: 0.86rem;
+  line-height: 1.6;
+  color: var(--ink);
+  background: var(--notice-bg);
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  padding: 0.85em 1em;
+}
+#note-body:focus {
+  outline: none;
+  border-color: var(--marker-rule);
+}
+#note-body::placeholder { color: var(--ink-faint); }
+
+.notes .status {
+  font-family: var(--sans);
+  font-size: 0.6rem;
+  color: var(--ink-faint);
+  margin: 0.5em 0 0;
+  min-height: 1em;
+}
+
+/* Highlights collected under the note, each linking back into the prose. */
+.marks { margin: 1.8rem 0 0; padding: 0; list-style: none; }
+.marks li {
+  margin: 0 0 0.9em;
+  padding-left: 0.9em;
+  border-left: 2px solid var(--marker-rule);
+}
+.marks blockquote {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-style: normal;
+  font-size: 0.84rem;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.marks .mark-note {
+  font-family: var(--sans);
+  font-size: 0.64rem;
+  color: var(--ink-faint);
+  margin: 0.3em 0 0;
+}
+.marks li.orphan { border-left-style: dotted; opacity: 0.72; }
+.marks li.orphan blockquote { cursor: default; }
+.marks .orphan-tag {
+  font-family: var(--sans);
+  font-size: 0.58rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: 0.3em 0 0;
+}
+
 @media (max-width: 640px) {
   html { font-size: 18px; }
   .page { padding: 3rem 1.2rem 6rem; }
@@ -373,12 +506,21 @@ DOCUMENT = """<!DOCTYPE html>
 {notice}
 <div class="prose">{content}</div>
 <p class="endmark">* * *</p>
+<section class="notes">
+  <h2>Your notes</h2>
+  <textarea id="note-body" placeholder="Write a note about this article…"
+            spellcheck="false">{note}</textarea>
+  <p class="status" id="note-status"></p>
+  <ul class="marks" id="marks"></ul>
+</section>
 <footer class="provenance">{provenance}</footer>
 </article>
+<div id="hl-pop"></div>
+<script>window.chronicleHighlights = {highlights};</script>
 <script>{script}</script>
 </body></html>"""
 
-SCRIPT = """
+SCRIPT = r"""
 (function () {
   // Wide tables get their own scroll container so the page never scrolls sideways.
   document.querySelectorAll('table').forEach(function (t) {
@@ -417,6 +559,371 @@ SCRIPT = """
     var max = document.body.scrollHeight - window.innerHeight;
     if (max > 0 && frac > 0) window.scrollTo(0, max * frac);
   };
+
+  // ---- annotations ------------------------------------------------------
+  //
+  // Highlights are stored as a quote plus the offset it was last found at,
+  // both measured against the article's PLAIN TEXT -- the concatenation of
+  // every text node in .prose. Working in that space rather than in the HTML
+  // means an anchor survives any change that does not alter the words, and
+  // the quote itself means it usually survives changes that do.
+
+  var prose = document.querySelector('.prose');
+  var pop = document.getElementById('hl-pop');
+  var marksList = document.getElementById('marks');
+  var noteBox = document.getElementById('note-body');
+  var noteStatus = document.getElementById('note-status');
+  if (!prose) return;
+
+  function send(payload) {
+    if (window.webkit && window.webkit.messageHandlers &&
+        window.webkit.messageHandlers.chronicle) {
+      window.webkit.messageHandlers.chronicle.postMessage(
+        JSON.stringify(payload));
+    }
+  }
+
+  // A flat index of the prose's text nodes: each entry records where that
+  // node's text begins in the whole-article string. Rebuilt after every
+  // change to the DOM, because painting a highlight splits text nodes.
+  var nodes = [], text = '';
+
+  function reindex() {
+    nodes = [];
+    text = '';
+    var walker = document.createTreeWalker(prose, NodeFilter.SHOW_TEXT, null);
+    var n;
+    while ((n = walker.nextNode())) {
+      // Skip text inside elements that carry no prose of their own.
+      if (n.parentNode && /^(SCRIPT|STYLE)$/.test(n.parentNode.nodeName)) continue;
+      nodes.push({ node: n, start: text.length });
+      text += n.nodeValue;
+    }
+  }
+
+  // Whitespace in HTML is not what a reader sees: a newline in the source and
+  // a space on screen are the same word boundary. Comparisons therefore run
+  // over a normalised copy, with a map back to real offsets so a match found
+  // in normalised space can still be painted in the real document.
+  var norm = '', normMap = [];
+
+  function renormalise() {
+    norm = '';
+    normMap = [];
+    var prevSpace = false;
+    for (var i = 0; i < text.length; i++) {
+      var ch = text[i];
+      if (/\s/.test(ch)) {
+        if (prevSpace) continue;
+        prevSpace = true;
+        norm += ' ';
+      } else {
+        prevSpace = false;
+        norm += ch;
+      }
+      normMap.push(i);
+    }
+  }
+
+  function normalise(s) {
+    return (s || '').replace(/\s+/g, ' ').trim();
+  }
+
+  // Locate a stored anchor in the current text. The quote is authoritative;
+  // the offset only decides between equally good matches, and the
+  // prefix/suffix break the remaining ties. Returns real (non-normalised)
+  // start/end offsets, or null when the words are simply not there any more.
+  function locate(h) {
+    var needle = normalise(h.quote);
+    if (!needle) return null;
+    var hits = [];
+    var from = 0, at;
+    while ((at = norm.indexOf(needle, from)) !== -1) {
+      hits.push(at);
+      from = at + 1;
+      if (hits.length > 200) break;   // pathological; the best is already in
+    }
+    if (!hits.length) return null;
+
+    var best = hits[0], bestScore = -Infinity;
+    var wantPrefix = normalise(h.prefix).slice(-32);
+    var wantSuffix = normalise(h.suffix).slice(0, 32);
+    for (var i = 0; i < hits.length; i++) {
+      var pos = hits[i];
+      var score = 0;
+      if (wantPrefix) {
+        var before = norm.slice(Math.max(0, pos - wantPrefix.length), pos);
+        if (before === wantPrefix) score += 1000;
+      }
+      if (wantSuffix) {
+        var after = norm.slice(pos + needle.length,
+                               pos + needle.length + wantSuffix.length);
+        if (after === wantSuffix) score += 1000;
+      }
+      // Nearness to where it was last seen, as the tie-breaker.
+      var realPos = normMap[pos] === undefined ? pos : normMap[pos];
+      score -= Math.abs(realPos - (h.start_offset || 0)) / 10000;
+      if (score > bestScore) { bestScore = score; best = pos; }
+    }
+    var startReal = normMap[best];
+    var endIdx = best + needle.length - 1;
+    var endReal = normMap[endIdx];
+    if (startReal === undefined || endReal === undefined) return null;
+    return { start: startReal, end: endReal + 1 };
+  }
+
+  // Turn a pair of plain-text offsets back into a live DOM Range.
+  function rangeFor(start, end) {
+    var startNode = null, startOff = 0, endNode = null, endOff = 0;
+    for (var i = 0; i < nodes.length; i++) {
+      var e = nodes[i];
+      var len = e.node.nodeValue.length;
+      if (startNode === null && start < e.start + len) {
+        startNode = e.node;
+        startOff = Math.max(0, start - e.start);
+      }
+      if (end <= e.start + len) {
+        endNode = e.node;
+        endOff = Math.max(0, end - e.start);
+        break;
+      }
+    }
+    if (!startNode || !endNode) return null;
+    var r = document.createRange();
+    try {
+      r.setStart(startNode, Math.min(startOff, startNode.nodeValue.length));
+      r.setEnd(endNode, Math.min(endOff, endNode.nodeValue.length));
+    } catch (err) { return null; }
+    return r;
+  }
+
+  // Wrap a range in <mark> elements. A range spanning several block elements
+  // cannot be wrapped in one node without restructuring the document, so it
+  // is painted per text node instead -- which also keeps the original markup
+  // (links, emphasis, code) intact inside the highlight.
+  function paint(range, h) {
+    var affected = [];
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i].node;
+      if (range.intersectsNode && range.intersectsNode(node)) affected.push(node);
+    }
+    if (!affected.length) return false;
+    var painted = 0;
+    for (var j = 0; j < affected.length; j++) {
+      var node = affected[j];
+      if (!node.parentNode) continue;
+      var from = (node === range.startContainer) ? range.startOffset : 0;
+      var to = (node === range.endContainer) ? range.endOffset
+                                             : node.nodeValue.length;
+      if (to <= from) continue;
+      var target = node;
+      if (to < node.nodeValue.length) target.splitText(to);
+      if (from > 0) target = target.splitText(from);
+      var mark = document.createElement('mark');
+      mark.className = 'hl' + (h.note ? ' has-note' : '');
+      mark.dataset.hl = h.id;
+      if (h.note) mark.title = h.note;
+      target.parentNode.replaceChild(mark, target);
+      mark.appendChild(target);
+      painted++;
+    }
+    return painted > 0;
+  }
+
+  var highlights = (window.chronicleHighlights || []).slice();
+
+  function render() {
+    // Start from clean prose so a re-render never nests marks inside marks.
+    document.querySelectorAll('mark.hl').forEach(function (m) {
+      var parent = m.parentNode;
+      while (m.firstChild) parent.insertBefore(m.firstChild, m);
+      parent.removeChild(m);
+      parent.normalize();
+    });
+    reindex();
+    renormalise();
+
+    var resolved = [];
+    highlights.forEach(function (h) {
+      var found = locate(h);
+      var ok = false;
+      if (found) {
+        var r = rangeFor(found.start, found.end);
+        if (r) {
+          ok = paint(r, h);
+          if (ok) {
+            h.resolved = found.start;
+            // Painting split text nodes, so every later lookup must run
+            // against the new tree.
+            reindex();
+            renormalise();
+          }
+        }
+      }
+      if (!ok) h.resolved = null;
+      resolved.push({ id: h.id, offset: h.resolved });
+    });
+
+    renderList();
+    // Tell the app where each highlight ended up, so an anchor that drifted
+    // is corrected in the database and one that vanished is marked orphaned
+    // rather than being silently dropped.
+    send({ type: 'anchors', anchors: resolved });
+  }
+
+  function renderList() {
+    if (!marksList) return;
+    marksList.innerHTML = '';
+    highlights.forEach(function (h) {
+      var li = document.createElement('li');
+      if (h.resolved === null || h.resolved === undefined) {
+        li.className = 'orphan';
+      }
+      var q = document.createElement('blockquote');
+      q.textContent = '“' + h.quote + '”';
+      li.appendChild(q);
+      if (h.note) {
+        var n = document.createElement('p');
+        n.className = 'mark-note';
+        n.textContent = h.note;
+        li.appendChild(n);
+      }
+      if (li.className === 'orphan') {
+        var tag = document.createElement('p');
+        tag.className = 'orphan-tag';
+        tag.textContent = 'no longer in this article';
+        li.appendChild(tag);
+      } else {
+        q.addEventListener('click', function () {
+          var mark = document.querySelector('mark.hl[data-hl="' + h.id + '"]');
+          if (mark) mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        });
+      }
+      marksList.appendChild(li);
+    });
+  }
+
+  // ---- the popup --------------------------------------------------------
+
+  function hidePop() { pop.style.display = 'none'; pop.innerHTML = ''; }
+
+  function showPop(rect, buttons) {
+    pop.innerHTML = '';
+    buttons.forEach(function (b) {
+      var el = document.createElement('button');
+      el.textContent = b.label;
+      el.addEventListener('mousedown', function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        hidePop();
+        b.run();
+      });
+      pop.appendChild(el);
+    });
+    pop.style.display = 'block';
+    var top = rect.top + window.scrollY - pop.offsetHeight - 8;
+    if (top < window.scrollY + 4) top = rect.bottom + window.scrollY + 8;
+    var left = rect.left + window.scrollX + (rect.width / 2) - (pop.offsetWidth / 2);
+    left = Math.max(6, Math.min(left, document.documentElement.clientWidth -
+                                      pop.offsetWidth - 6));
+    pop.style.top = top + 'px';
+    pop.style.left = left + 'px';
+  }
+
+  document.addEventListener('mouseup', function (ev) {
+    if (pop.contains(ev.target)) return;
+    setTimeout(function () {
+      var sel = window.getSelection();
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) { hidePop(); return; }
+      var range = sel.getRangeAt(0);
+      if (!prose.contains(range.commonAncestorContainer)) { hidePop(); return; }
+      var quote = normalise(sel.toString());
+      if (quote.length < 2) { hidePop(); return; }
+
+      // Where the selection begins, in plain-text coordinates.
+      reindex();
+      var start = 0;
+      for (var i = 0; i < nodes.length; i++) {
+        if (nodes[i].node === range.startContainer) {
+          start = nodes[i].start + range.startOffset;
+          break;
+        }
+      }
+      var raw = text;
+      var prefix = raw.slice(Math.max(0, start - 40), start);
+      var suffix = raw.slice(start + sel.toString().length,
+                             start + sel.toString().length + 40);
+
+      showPop(range.getBoundingClientRect(), [{
+        label: 'Highlight',
+        run: function () {
+          send({ type: 'highlight-add', quote: quote, prefix: prefix,
+                 suffix: suffix, start_offset: start });
+          sel.removeAllRanges();
+        }
+      }]);
+    }, 0);
+  });
+
+  document.addEventListener('mousedown', function (ev) {
+    if (pop.contains(ev.target)) return;
+    var mark = ev.target.closest && ev.target.closest('mark.hl');
+    if (!mark) { hidePop(); return; }
+    var id = parseInt(mark.dataset.hl, 10);
+    var h = highlights.filter(function (x) { return x.id === id; })[0];
+    ev.preventDefault();
+    showPop(mark.getBoundingClientRect(), [
+      { label: h && h.note ? 'Edit note' : 'Add note',
+        run: function () { send({ type: 'highlight-note', id: id }); } },
+      { label: 'Remove',
+        run: function () { send({ type: 'highlight-remove', id: id }); } }
+    ]);
+  });
+
+  window.addEventListener('scroll', hidePop, { passive: true });
+
+  // Applied by the app after the database has accepted a change, so what is
+  // on screen is always what was actually stored.
+  window.chronicleSetHighlights = function (list) {
+    highlights = (list || []).slice();
+    render();
+  };
+
+  // ---- the note ---------------------------------------------------------
+
+  if (noteBox) {
+    var saveTimer = null;
+    var lastSent = noteBox.value;
+
+    function flushNote() {
+      if (noteBox.value === lastSent) return;
+      lastSent = noteBox.value;
+      send({ type: 'note', body: noteBox.value });
+      if (noteStatus) {
+        noteStatus.textContent = 'Saved';
+        setTimeout(function () { noteStatus.textContent = ''; }, 1600);
+      }
+    }
+
+    noteBox.addEventListener('input', function () {
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(flushNote, 700);
+    });
+    // Leaving the field, or the page, must not lose what was typed.
+    noteBox.addEventListener('blur', flushNote);
+    window.addEventListener('pagehide', flushNote);
+    window.chronicleFlushNote = flushNote;
+
+    // The reader's single-key shortcuts (n, f, r…) are window accelerators on
+    // the GTK side and never reach the WebView, but Escape should still let
+    // go of the field so they start working again.
+    noteBox.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Escape') { flushNote(); noteBox.blur(); }
+      ev.stopPropagation();
+    });
+  }
+
+  render();
 })();
 """
 
@@ -483,7 +990,24 @@ def build_provenance(article) -> str:
     return "<br>".join(bits)
 
 
-def build_document(article, dark: bool = False) -> str:
+def highlights_json(rows) -> str:
+    """The reader's highlights, as the JSON the page's script expects.
+
+    Only the fields the page actually needs: it re-locates each highlight by
+    its own quote, so the stored offset travels as a hint rather than as
+    something to be trusted.
+    """
+    out = []
+    for r in rows or []:
+        out.append({"id": r["id"], "quote": r["quote"], "prefix": r["prefix"],
+                    "suffix": r["suffix"], "start_offset": r["start_offset"],
+                    "note": r["note"]})
+    # </script> inside a string literal would end the block early.
+    return _json.dumps(out).replace("</", "<\\/")
+
+
+def build_document(article, dark: bool = False, note: str = "",
+                   highlights=None) -> str:
     """Assemble the full reader page for one article."""
     return DOCUMENT.format(
         theme="dark" if dark else "light",
@@ -494,6 +1018,8 @@ def build_document(article, dark: bool = False) -> str:
         content=article["content_html"] or
                 '<p class="notice">This article has no stored content yet.</p>',
         provenance=build_provenance(article),
+        note=_esc(note),
+        highlights=highlights_json(highlights),
         css=READER_CSS,
         script=SCRIPT,
     )
