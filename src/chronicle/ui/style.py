@@ -964,14 +964,21 @@ def elide_url(uri: str) -> str:
 NOTE_PREVIEW = 120
 
 
-def note_line(row) -> str:
+def note_line(row, prefer_mark: bool = False) -> str:
     """The one line of the reader's own writing to show under a queue row.
 
     Their note about the article says the most, so it wins. Failing that,
     something they marked -- a note on a highlight, else the highlighted words
     -- so a marked-up article is never a blank row in the Notes list.
+
+    `prefer_mark` flips that order for the Highlights list, where the passage
+    the reader marked *is* what the list is about: showing their article-level
+    note there would answer a question they did not ask.
     """
-    for value, quoted in ((row["note_body"], False), (row["first_mark"], True)):
+    sources = ((row["note_body"], False), (row["first_mark"], True))
+    if prefer_mark:
+        sources = tuple(reversed(sources))
+    for value, quoted in sources:
         text = " ".join((value or "").split())
         if not text:
             continue

@@ -71,7 +71,8 @@ class GenericSource(Source):
 
         archive_entries, index = discovery.read_archive(
             base, self.config, ctx, self.in_scope, is_known=already_known,
-            max_pages=discovery.NEWEST_ARCHIVE_PAGES if ctx.newest_only else None)
+            max_pages=discovery.NEWEST_ARCHIVE_PAGES if ctx.newest_only else None,
+            admit=self.scope_by_membership if self.path_prefix else None)
         report.archive_index = index
         report.archive_count = len(archive_entries)
         if archive_entries:

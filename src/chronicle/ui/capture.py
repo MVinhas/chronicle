@@ -12,6 +12,7 @@ Driven entirely by environment variables so it never affects normal runs:
     CHRONICLE_SHOT_SIZE     WxH to force the window to, e.g. 1280x800
     CHRONICLE_SHOT_ARTICLE  article id to open, from the top, unscrolled
     CHRONICLE_SHOT_SCROLL   0..1 fraction to scroll the library list to
+    CHRONICLE_SHOT_SCOPE    library filter to select (e.g. highlighted, skipped)
 
 CHRONICLE_DEMO=1 instead walks the window through a short scripted tour.
 Setting CHRONICLE_DEMO_FRAMES to a directory records that tour frame by frame,
@@ -241,6 +242,13 @@ def arm(window) -> None:
                 window.open_article(int(article), remember=False)
             if page in ("reader", "library", "sources"):
                 window.show_page(page)
+            # Select a library filter, so a shot can show one of the scopes
+            # rather than only the default "All".
+            wanted = os.environ.get("CHRONICLE_SHOT_SCOPE")
+            if wanted and page == "library":
+                button = window.library._buttons.get(wanted)
+                if button is not None:
+                    button.set_active(True)
             if scroll and page == "library":
                 _scroll_library(window, float(scroll))
             # Let the page settle (WebKit paint, list realisation) before capture.

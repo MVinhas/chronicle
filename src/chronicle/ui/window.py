@@ -26,6 +26,16 @@ READ_THRESHOLD = 0.92
 # returns to the ordinary position line.
 RESUME_HINT_SECONDS = 6
 
+# A title long enough to know which article the toast means, short enough not
+# to push its Undo button off a narrow window.
+TOAST_TITLE_CHARS = 48
+
+
+def _shorten(text: str, limit: int = TOAST_TITLE_CHARS) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
 APP_CSS = b"""
 .chronicle-filter { padding: 2px 14px; min-height: 26px; }
 .chronicle-position { font-size: 0.82em; }
@@ -181,6 +191,15 @@ class MainWindow(Adw.ApplicationWindow):
         self.read_button.connect("toggled", self._on_read_toggled)
         left.append(self.read_button)
 
+        # Skip sits with the other judgements about the article rather than
+        # with the arrows: it is a decision, not a movement, even though it
+        # happens to move you on.
+        self.skip_button = Gtk.Button(icon_name="go-jump-symbolic",
+                                      tooltip_text="Skip this article (S)",
+                                      css_classes=["flat"])
+        self.skip_button.connect("clicked", lambda *_: self.skip_article())
+        left.append(self.skip_button)
+
         right = Gtk.Box(spacing=4)
         right.append(self.next_button)
 
@@ -219,6 +238,7 @@ class MainWindow(Adw.ApplicationWindow):
             ("previous", self.go_previous, ["<Alt>Left"], ["p", "k", "Page_Up"]),
             ("favourite", self.toggle_favourite, [], ["f"]),
             ("toggle-read", self.toggle_read, [], ["r"]),
+            ("skip", self.skip_article, [], ["s"]),
             ("library", lambda *_: self.show_page("library"), [], ["l"]),
             ("reader", lambda *_: self.show_page("reader"), ["<Control>1"], []),
             ("sources", lambda *_: self.show_page("sources"), ["<Control>2"], []),
@@ -443,11 +463,11 @@ class MainWindow(Adw.ApplicationWindow):
             self._position_text = ""
             self.position_label.set_label("")
             for w in (self.prev_button, self.next_button, self.fav_button,
-                      self.read_button):
+                      self.read_button, self.skip_button):
                 w.set_sensitive(False)
             return
         for w in (self.prev_button, self.next_button, self.fav_button,
-                  self.read_button):
+                  self.read_button, self.skip_button):
             w.set_sensitive(True)
 
         label = dates.format_display(article["published_at"],
@@ -516,6 +536,42 @@ class MainWindow(Adw.ApplicationWindow):
                                             timeout=3))
             return
         self.open_article(prev["id"])
+
+    def skip_article(self, *_):
+        """Pass this article over and move on to the next one.
+
+        The next article is worked out *before* the skip is recorded: once
+        skipped, this article is no longer in the queue, and asking for its
+        neighbour afterwards would be asking about a row that is no longer
+        there. Deliberately not marked read -- a skip is its own verdict.
+        """
+        if self.current is None:
+            return
+        article_id = self.current["id"]
+        title = self.current["title"] or "Untitled"
+        self._flush_scroll()
+        nxt = db.neighbour(self._conn, article_id, +1, hide_read=self.hide_read)
+        db.set_skipped(self._conn, article_id, True)
+
+        toast = Adw.Toast(title=f"Skipped “{_shorten(title)}”", timeout=5,
+                          button_label="Undo")
+        toast.connect("button-clicked", self._undo_skip, article_id)
+        self.toasts.add_toast(toast)
+
+        if nxt is None:
+            # Nothing after it: stay put rather than leaving a blank reader,
+            # but the chrome has to be rebuilt so the queue figures are right.
+            self.refresh_library()
+            self._update_reader_chrome(self.current)
+            return
+        self.open_article(nxt["id"])
+        self.refresh_library()
+
+    def _undo_skip(self, _toast, article_id: int) -> None:
+        """Put a skipped article back, and return to it."""
+        db.set_skipped(self._conn, article_id, False)
+        self.open_article(article_id)
+        self.refresh_library()
 
     def toggle_favourite(self, *_):
         self.fav_button.set_active(not self.fav_button.get_active())
@@ -710,6 +766,7 @@ class MainWindow(Adw.ApplicationWindow):
             ("Back to top", "Home"),
             ("Favourite", "F"),
             ("Mark read / unread", "R"),
+            ("Skip this article", "S"),
             ("Library", "L / Esc"),
             ("Search", "Ctrl+F or /"),
             ("Fetch new posts", "F5"),

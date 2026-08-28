@@ -346,6 +346,7 @@ def _collect_sitemap(xml: str, ctx, depth: int) -> list[str]:
 
 def read_archive(base: str, config: dict, ctx, in_scope,
                  is_known=lambda url: False, max_pages: int | None = None,
+                 admit=None,
                  ) -> tuple[list[tuple[str, dates.PubDate]], str | None]:
     """Article links from the site's own archive/index pages and pagination.
 
@@ -358,13 +359,25 @@ def read_archive(base: str, config: dict, ctx, in_scope,
     `max_pages` caps that pagination regardless of what it finds, which is how
     "Fetch new posts" keeps a routine update to a handful of requests even on
     a site whose listing carries no dates for the incremental stop to use.
+
+    `admit` is called with the links a *configured* section index published
+    before they are scope-filtered. It lets a section whose articles live
+    off its own path (a category or tag listing, whose posts sit at the site
+    root) widen the scope to exactly what it listed -- without which every
+    such source discovers nothing at all.
     """
     if config.get("index") == "":
         return [], None   # looked before: this site keeps no archive index
-    paths = ((config.get("index"),) if config.get("index") else ()) + ARCHIVE_PATHS
+    configured = config.get("index") or None
+    paths = ((configured,) if configured else ()) + ARCHIVE_PATHS
     for path in paths:
         ctx.check()
         links = _links_from(base + path, base)
+        # The section the user actually asked for gets to say what belongs to
+        # it. Done before scope filtering, because on a category or tag index
+        # the filter would otherwise reject every link on the page.
+        if admit is not None and path == configured:
+            admit([u for u, _ in links])
         links = [(u, h) for u, h in links if in_scope(u)]
         if len(links) < 3:
             continue
@@ -381,6 +394,8 @@ def read_archive(base: str, config: dict, ctx, in_scope,
             if not more:
                 more = _links_from(
                     _with_query_param(base + path, "paged", str(page)), base)
+            if admit is not None and path == configured:
+                admit([u for u, _ in more])
             more = [(u, h) for u, h in more if in_scope(u)]
             fresh = [(u, h) for u, h in more if u not in seen]
             if not fresh:

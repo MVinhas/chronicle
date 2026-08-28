@@ -205,6 +205,84 @@ class TestScope(unittest.TestCase):
         self.assertTrue(src.in_scope("https://example.com/blog/x"))
 
 
+class TestSectionMembershipScoping(unittest.TestCase):
+    """A section index whose articles live elsewhere on the site.
+
+    WordPress category and tag pages are the common case: the index sits at
+    /category/<name>/ but every post it lists is at the site root. Scoping
+    such a source by path prefix rejected every article the index found, so
+    the source archived nothing at all -- silently.
+    """
+
+    BASE = "https://example.com"
+    SLUGS = ["prostate-cancer-psa", "metformin-and-cancer", "gum-recession",
+             "cataracts-and-dementia"]
+    MORE = ["protein-and-renal-function", "multifactorial-trials"]
+
+    def _listing(self, slugs, next_page=None):
+        links = "".join(
+            f'<li><a href="{self.BASE}/{s}/">{s}</a> '
+            f'<span>January {i + 1}, 2024</span></li>'
+            for i, s in enumerate(slugs))
+        head = f'<link rel="next" href="{next_page}"/>' if next_page else ""
+        return f"<html><head>{head}</head><body><ul>{links}</ul></body></html>"
+
+    def _site(self):
+        from fakesite import FakeNet
+        fn = FakeNet()
+        index = f"{self.BASE}/category/weekly-newsletter/"
+        fn.add(index, self._listing(self.SLUGS, index + "page/2/"))
+        fn.add(index + "page/2/", self._listing(self.MORE))
+        for slug in self.SLUGS + self.MORE + ["some-podcast-episode"]:
+            fn.add(f"{self.BASE}/{slug}/",
+                   "<html><body><article><h1>" + slug + "</h1>" +
+                   "<p>Real prose about the subject at hand. " * 40 +
+                   "</p></article></body></html>")
+        return fn
+
+    def _source(self):
+        from chronicle.sources.generic import GenericSource
+        return GenericSource(
+            {"id": 1, "name": "Example", "homepage": self.BASE},
+            {"strategy": "archive", "index": "/category/weekly-newsletter/",
+             "path_prefix": "/category/weekly-newsletter"})
+
+    def _discover(self, src):
+        from chronicle.sources.base import Context
+        with self._site().patched():
+            return list(src.discover(Context()))
+
+    def test_a_category_index_finds_its_articles(self):
+        src = self._source()
+        found = {s.url for s in self._discover(src)}
+        self.assertEqual(
+            found, {f"{self.BASE}/{s}/" for s in self.SLUGS + self.MORE})
+
+    def test_later_pages_of_the_index_still_count(self):
+        """Page 2 must widen the scope, not replace what page 1 vouched for."""
+        src = self._source()
+        found = {s.url for s in self._discover(src)}
+        for slug in self.MORE:
+            self.assertIn(f"{self.BASE}/{slug}/", found)
+        for slug in self.SLUGS:
+            self.assertIn(f"{self.BASE}/{slug}/", found)
+
+    def test_the_rest_of_the_site_stays_out(self):
+        """Widening the scope must not turn a section into the whole site."""
+        src = self._source()
+        self._discover(src)
+        self.assertFalse(src.in_scope(f"{self.BASE}/some-podcast-episode/"))
+        self.assertTrue(src.in_scope(f"{self.BASE}/prostate-cancer-psa/"))
+
+    def test_a_genuine_path_section_is_still_scoped_by_path(self):
+        """The ordinary case must not regress: /blog/ means /blog/."""
+        from chronicle.sources.generic import GenericSource
+        src = GenericSource({"id": 1, "name": "E", "homepage": self.BASE},
+                            {"path_prefix": "/blog"})
+        self.assertTrue(src.in_scope(f"{self.BASE}/blog/a-post"))
+        self.assertFalse(src.in_scope(f"{self.BASE}/elsewhere/a-post"))
+
+
 class TestQueue(unittest.TestCase):
     """Ordering, de-duplication and date-confidence rules in the store."""
 
@@ -371,6 +449,86 @@ class TestQueue(unittest.TestCase):
         nxt = self.db.neighbour(self.conn, a, +1, hide_read=True)
         self.assertEqual(nxt["id"], c)
 
+    # -- skipping ---------------------------------------------------------
+
+    def test_skipping_takes_an_article_out_of_the_queue(self):
+        """The point of the button: the queue you work through shrinks."""
+        self.add("a", "2001-01-01T00:00:00")
+        b = self.add("b", "2002-01-01T00:00:00")
+        self.db.set_skipped(self.conn, b, True)
+
+        self.assertEqual([r["title"] for r in self.db.queue(self.conn)], ["a"])
+        self.assertEqual(self.db.queue_counts(self.conn)["all"], 1)
+        self.assertEqual(self.db.queue_counts(self.conn)["skipped"], 1)
+
+    def test_a_skip_is_not_a_read(self):
+        """Conflating them would make the per-blog percentage unanswerable."""
+        a = self.add("a", "2001-01-01T00:00:00")
+        self.db.set_skipped(self.conn, a, True)
+        self.assertTrue(self.db.is_skipped(self.conn, a))
+        row = self.conn.execute(
+            "SELECT read_at FROM reading_state WHERE article_id=?", (a,)).fetchone()
+        self.assertIsNone(row["read_at"])
+
+    def test_the_skipped_scope_shows_them_back(self):
+        a = self.add("a", "2001-01-01T00:00:00")
+        self.add("b", "2002-01-01T00:00:00")
+        self.db.set_skipped(self.conn, a, True)
+        self.assertEqual(
+            [r["title"] for r in self.db.queue(self.conn, scope="skipped")], ["a"])
+
+    def test_unskipping_restores_the_article(self):
+        a = self.add("a", "2001-01-01T00:00:00")
+        self.db.set_skipped(self.conn, a, True)
+        self.db.set_skipped(self.conn, a, False)
+        self.assertEqual(len(self.db.queue(self.conn)), 1)
+        self.assertEqual(self.db.queue_counts(self.conn)["skipped"], 0)
+
+    def test_navigation_passes_over_skipped_articles(self):
+        a = self.add("a", "2001-01-01T00:00:00")
+        b = self.add("b", "2002-01-01T00:00:00")
+        c = self.add("c", "2003-01-01T00:00:00")
+        self.db.set_skipped(self.conn, b, True)
+        self.assertEqual(self.db.neighbour(self.conn, a, +1)["id"], c)
+
+    def test_skip_rate_counts_only_readable_articles(self):
+        """A half-built archive must not read as a low skip rate."""
+        a = self.add("a", "2001-01-01T00:00:00")
+        self.add("b", "2002-01-01T00:00:00")
+        pending, _ = self.db.upsert_article(
+            self.conn, self.sid, "p", url="https://t.example/p", title="p",
+            published_at="2003-01-01T00:00:00")
+        self.db.set_skipped(self.conn, a, True)
+
+        skipped, total = self.db.skip_rates(self.conn)[self.sid]
+        self.assertEqual((skipped, total), (1, 2))
+
+    # -- highlights list ----------------------------------------------------
+
+    def test_highlighted_scope_lists_only_marked_articles(self):
+        a = self.add("a", "2001-01-01T00:00:00")
+        b = self.add("b", "2002-01-01T00:00:00")
+        self.db.add_highlight(self.conn, a, "a marked passage")
+        self.db.set_note(self.conn, b, "a note, but nothing highlighted")
+
+        self.assertEqual(
+            [r["title"] for r in self.db.queue(self.conn, scope="highlighted")], ["a"])
+        # Notes still lists both -- the two lists answer different questions.
+        self.assertEqual(
+            [r["title"] for r in self.db.queue(self.conn, scope="annotated")], ["a", "b"])
+        self.assertEqual(self.db.queue_counts(self.conn)["highlighted"], 1)
+
+    def test_highlight_list_prefers_the_marked_passage(self):
+        """In the Highlights list the passage is the point, not the note."""
+        from chronicle.ui.style import note_line
+        a = self.add("a", "2001-01-01T00:00:00")
+        self.db.add_highlight(self.conn, a, "the words they marked")
+        self.db.set_note(self.conn, a, "a note about the whole article")
+        row = self.db.queue(self.conn, scope="highlighted")[0]
+
+        self.assertIn("the words they marked", note_line(row, prefer_mark=True))
+        self.assertIn("a note about the whole article", note_line(row))
+
     def test_disabled_source_leaves_the_queue(self):
         self.add("a", "2001-01-01T00:00:00")
         self.db.set_source_enabled(self.conn, self.sid, False)
@@ -381,6 +539,66 @@ class TestQueue(unittest.TestCase):
         self.add("b", "2002-01-01T00:00:00", title="Taste for Makers")
         hits = self.db.queue(self.conn, search="averages")
         self.assertEqual([r["title"] for r in hits], ["Beating the Averages"])
+
+
+class TestMigration(unittest.TestCase):
+    """Opening a library written by an older Chronicle must not break it."""
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+
+    def tearDown(self):
+        os.unlink(self.tmp.name)
+
+    def _old_library(self):
+        """A v2 reading_state: no skipped_at column."""
+        import sqlite3
+        conn = sqlite3.connect(self.tmp.name)
+        conn.executescript("""
+            CREATE TABLE reading_state (
+                article_id INTEGER PRIMARY KEY, read_at TEXT,
+                favourite_at TEXT, scroll_pos REAL NOT NULL DEFAULT 0,
+                last_opened_at TEXT);
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta VALUES('schema_version','2');
+            INSERT INTO reading_state(article_id, read_at, scroll_pos)
+                VALUES(7,'2020-01-01T00:00:00', 0.5);
+        """)
+        conn.commit()
+        conn.close()
+
+    def test_the_new_column_is_added_to_an_existing_library(self):
+        from chronicle import db
+        self._old_library()
+        conn = db.connect(self.tmp.name)
+        db.init(conn)
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(reading_state)")}
+        self.assertIn("skipped_at", cols)
+        conn.close()
+
+    def test_existing_reading_state_survives(self):
+        """A migration that lost where the reader had got to would be worse
+        than no migration at all."""
+        from chronicle import db
+        self._old_library()
+        conn = db.connect(self.tmp.name)
+        db.init(conn)
+        row = conn.execute("SELECT * FROM reading_state WHERE article_id=7").fetchone()
+        self.assertEqual(row["read_at"], "2020-01-01T00:00:00")
+        self.assertEqual(row["scroll_pos"], 0.5)
+        self.assertIsNone(row["skipped_at"])
+        conn.close()
+
+    def test_opening_twice_is_harmless(self):
+        from chronicle import db
+        self._old_library()
+        conn = db.connect(self.tmp.name)
+        db.init(conn)
+        db.init(conn)
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(reading_state)")]
+        self.assertEqual(cols.count("skipped_at"), 1)
+        conn.close()
 
 
 class TestPaulGraham(unittest.TestCase):
