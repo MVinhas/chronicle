@@ -205,6 +205,84 @@ class TestScope(unittest.TestCase):
         self.assertTrue(src.in_scope("https://example.com/blog/x"))
 
 
+class TestSectionMembershipScoping(unittest.TestCase):
+    """A section index whose articles live elsewhere on the site.
+
+    WordPress category and tag pages are the common case: the index sits at
+    /category/<name>/ but every post it lists is at the site root. Scoping
+    such a source by path prefix rejected every article the index found, so
+    the source archived nothing at all -- silently.
+    """
+
+    BASE = "https://example.com"
+    SLUGS = ["prostate-cancer-psa", "metformin-and-cancer", "gum-recession",
+             "cataracts-and-dementia"]
+    MORE = ["protein-and-renal-function", "multifactorial-trials"]
+
+    def _listing(self, slugs, next_page=None):
+        links = "".join(
+            f'<li><a href="{self.BASE}/{s}/">{s}</a> '
+            f'<span>January {i + 1}, 2024</span></li>'
+            for i, s in enumerate(slugs))
+        head = f'<link rel="next" href="{next_page}"/>' if next_page else ""
+        return f"<html><head>{head}</head><body><ul>{links}</ul></body></html>"
+
+    def _site(self):
+        from fakesite import FakeNet
+        fn = FakeNet()
+        index = f"{self.BASE}/category/weekly-newsletter/"
+        fn.add(index, self._listing(self.SLUGS, index + "page/2/"))
+        fn.add(index + "page/2/", self._listing(self.MORE))
+        for slug in self.SLUGS + self.MORE + ["some-podcast-episode"]:
+            fn.add(f"{self.BASE}/{slug}/",
+                   "<html><body><article><h1>" + slug + "</h1>" +
+                   "<p>Real prose about the subject at hand. " * 40 +
+                   "</p></article></body></html>")
+        return fn
+
+    def _source(self):
+        from chronicle.sources.generic import GenericSource
+        return GenericSource(
+            {"id": 1, "name": "Example", "homepage": self.BASE},
+            {"strategy": "archive", "index": "/category/weekly-newsletter/",
+             "path_prefix": "/category/weekly-newsletter"})
+
+    def _discover(self, src):
+        from chronicle.sources.base import Context
+        with self._site().patched():
+            return list(src.discover(Context()))
+
+    def test_a_category_index_finds_its_articles(self):
+        src = self._source()
+        found = {s.url for s in self._discover(src)}
+        self.assertEqual(
+            found, {f"{self.BASE}/{s}/" for s in self.SLUGS + self.MORE})
+
+    def test_later_pages_of_the_index_still_count(self):
+        """Page 2 must widen the scope, not replace what page 1 vouched for."""
+        src = self._source()
+        found = {s.url for s in self._discover(src)}
+        for slug in self.MORE:
+            self.assertIn(f"{self.BASE}/{slug}/", found)
+        for slug in self.SLUGS:
+            self.assertIn(f"{self.BASE}/{slug}/", found)
+
+    def test_the_rest_of_the_site_stays_out(self):
+        """Widening the scope must not turn a section into the whole site."""
+        src = self._source()
+        self._discover(src)
+        self.assertFalse(src.in_scope(f"{self.BASE}/some-podcast-episode/"))
+        self.assertTrue(src.in_scope(f"{self.BASE}/prostate-cancer-psa/"))
+
+    def test_a_genuine_path_section_is_still_scoped_by_path(self):
+        """The ordinary case must not regress: /blog/ means /blog/."""
+        from chronicle.sources.generic import GenericSource
+        src = GenericSource({"id": 1, "name": "E", "homepage": self.BASE},
+                            {"path_prefix": "/blog"})
+        self.assertTrue(src.in_scope(f"{self.BASE}/blog/a-post"))
+        self.assertFalse(src.in_scope(f"{self.BASE}/elsewhere/a-post"))
+
+
 class TestQueue(unittest.TestCase):
     """Ordering, de-duplication and date-confidence rules in the store."""
 

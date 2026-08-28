@@ -265,6 +265,26 @@ class Source:
     def path_prefix(self) -> str:
         return (self.config.get("path_prefix") or "").rstrip("/")
 
+    def scope_by_membership(self, urls) -> None:
+        """Let the section's own listing define the section.
+
+        Some indexes list articles that do not live under the index's path: a
+        WordPress category or tag page is the common case -- every post it
+        lists sits at the site root. Scoping such a source by path prefix
+        rejects every article the index found, and the source silently
+        archives nothing.
+
+        So when the index's links are elsewhere, the *set of links the index
+        published* becomes the scope. That still cannot pull in the whole
+        site: only what this section's own pages listed is ever accepted.
+        """
+        # Accumulated, not replaced: the index's later pages each call this,
+        # and page 2 must not revoke what page 1 vouched for.
+        members = getattr(self, "_members", None)
+        if members is None:
+            members = self._members = set()
+        members.update(net.canonical_url(u) for u in urls if u)
+
     def in_scope(self, url: str) -> bool:
         """Is this article inside the section the user asked to follow?"""
         prefix = self.path_prefix
@@ -272,7 +292,12 @@ class Source:
             return True
         from urllib.parse import urlparse
         path = urlparse(url or "").path.rstrip("/")
-        return path == prefix or path.startswith(prefix + "/")
+        if path == prefix or path.startswith(prefix + "/"):
+            return True
+        # A section whose listing points off its own path vouches for the
+        # articles it listed, and for nothing else.
+        members = getattr(self, "_members", None)
+        return bool(members) and net.canonical_url(url) in members
 
     @staticmethod
     def guid_for(url: str) -> str:
