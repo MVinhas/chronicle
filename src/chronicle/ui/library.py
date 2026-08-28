@@ -68,7 +68,7 @@ class LibraryView(Gtk.Box):
         first = None
         for scope, label in (("all", "All"), ("unread", "Unread"),
                              ("favourites", "Favourites"), ("annotated", "Notes"),
-                             ("read", "Read")):
+                             ("read", "Read"), ("skipped", "Skipped")):
             btn = Gtk.ToggleButton(label=label)
             btn.add_css_class("chronicle-filter")
             if first is None:
@@ -210,6 +210,8 @@ class LibraryView(Gtk.Box):
             bits.append(f"{marks} highlight" + ("s" if marks != 1 else ""))
         if row["note_count"]:
             bits.append("noted")
+        if row["skipped_at"]:
+            bits.append("skipped")
         meta.set_label("  ·  ".join(bits))
 
         # Rows are recycled as the list scrolls, so this has to be cleared on
@@ -267,12 +269,17 @@ class LibraryView(Gtk.Box):
                        "You have read everything in the queue."),
             "read": ("Nothing read yet",
                      "Articles you finish collect here."),
+            "skipped": ("Nothing skipped",
+                        "Press S while reading to pass an article over. "
+                        "Skipped articles leave the queue and collect here, "
+                        "where you can put any of them back."),
         }.get(self.scope)
         if blurb is None:
             blurb = ("Nothing here", "No articles match this filter.")
-        self.empty.set_icon_name("view-list-symbolic"
-                                 if self.scope != "annotated"
-                                 else "format-text-rich-symbolic")
+        self.empty.set_icon_name({
+            "annotated": "format-text-rich-symbolic",
+            "skipped": "go-jump-symbolic",
+        }.get(self.scope, "view-list-symbolic"))
         self.empty.set_title(blurb[0])
         self.empty.set_description(blurb[1])
 
@@ -330,6 +337,8 @@ class LibraryView(Gtk.Box):
                 f"{counts['favourites']:,} favourites").replace(",", " ")
         if counts["annotated"]:
             text += f"  ·  {counts['annotated']:,} with notes".replace(",", " ")
+        if counts["skipped"]:
+            text += f"  ·  {counts['skipped']:,} skipped".replace(",", " ")
         if counts["undated"]:
             text += f"  ·  {counts['undated']} undated"
         if self.hide_read and self.scope not in db.HIDE_READ_EXEMPT:

@@ -72,6 +72,7 @@ It remembers where you got to.
 | `Space` | scroll |
 | `F` | favourite |
 | `R` | mark read / unread |
+| `S` | skip, and go to the next |
 | `L` / `Esc` | back to the list |
 | `Ctrl+F` | search |
 | `Ctrl+T` | light / dark theme |
@@ -99,6 +100,24 @@ The library has a **Notes** filter listing everything you annotated, with what
 you wrote shown under each article.
 
 All of it stays on your machine, and an archive update never overwrites it.
+
+## Skipping what you don't want
+
+Not everything a blog publishes is for you. Press `S` and Chronicle passes the
+article over and moves you to the next one — it leaves the queue rather than
+counting as read, so the two never get confused. There's an **Undo** on the
+way out if you change your mind, and a **Skipped** filter in the library that
+lists them all and puts any of them back.
+
+The **Blogs** tab then shows what proportion of each blog you have skipped:
+
+```
+Peter Attia MD    412 readable  ·  2018–2026  ·  62% skipped
+Wait But Why      184 readable  ·  2013–2026  ·  4% skipped
+```
+
+Which is the useful part — it tells you, from your own reading rather than a
+guess, which blogs are earning their place in the queue.
 
 ## Keeping up to date
 

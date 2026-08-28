@@ -13,6 +13,11 @@ from gi.repository import Adw, GLib, GObject, Gtk  # noqa: E402
 from .. import db, sources  # noqa: E402
 
 
+# Below this many readable articles, a skip percentage is noise rather than a
+# signal about the blog, so it is not shown at all.
+SKIP_RATE_MINIMUM = 5
+
+
 def _format_eta(seconds: float) -> str:
     seconds = max(0, int(seconds))
     if seconds < 60:
@@ -135,6 +140,7 @@ class SourcesView(Gtk.Box):
         self._rows.clear()
 
         conn = self.get_conn()
+        rates = db.skip_rates(conn)
         for src in db.list_sources(conn):
             count = conn.execute(
                 "SELECT COUNT(*) c FROM articles WHERE source_id=?",
@@ -159,6 +165,14 @@ class SourcesView(Gtk.Box):
                 bits.append("not built yet")
             if src["last_sync_status"] == "error":
                 bits.append("last update failed")
+
+            # How much of this blog the reader has passed over. Shown only
+            # once there is enough of a sample for a percentage to mean
+            # anything -- "100% skipped" off a single article says nothing
+            # about the blog, and would read as a verdict on it.
+            skipped, rated = rates.get(src["id"], (0, 0))
+            if skipped and rated >= SKIP_RATE_MINIMUM:
+                bits.append(f"{round(100 * skipped / rated)}% skipped")
 
             row = Adw.ActionRow(title=src["name"], subtitle="  ·  ".join(bits))
             row.set_subtitle_lines(2)

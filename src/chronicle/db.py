@@ -15,7 +15,7 @@ from typing import Any, Iterable, Sequence
 
 from . import paths
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -73,10 +73,15 @@ CREATE TABLE IF NOT EXISTS reading_state (
     read_at        TEXT,
     favourite_at   TEXT,
     scroll_pos     REAL NOT NULL DEFAULT 0,
-    last_opened_at TEXT
+    last_opened_at TEXT,
+    -- Set when the reader passed an article over rather than reading it.
+    -- Kept apart from read_at: a skip is a judgement about the article, and
+    -- conflating the two would make "38% skipped" unanswerable.
+    skipped_at     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_reading_fav  ON reading_state (favourite_at);
 CREATE INDEX IF NOT EXISTS idx_reading_read ON reading_state (read_at);
+CREATE INDEX IF NOT EXISTS idx_reading_skip ON reading_state (skipped_at);
 
 CREATE TABLE IF NOT EXISTS images (
     id         INTEGER PRIMARY KEY,
@@ -247,12 +252,39 @@ def get_conn() -> sqlite3.Connection:
 
 
 def init(conn: sqlite3.Connection) -> None:
+    # Migrations run first: SCHEMA creates indexes over columns that an older
+    # library does not have yet, and CREATE INDEX on a missing column is a
+    # hard error -- so the column has to exist before the script runs.
+    _migrate(conn)
     conn.executescript(SCHEMA)
     cur = conn.execute("SELECT value FROM meta WHERE key='schema_version'")
     row = cur.fetchone()
     if row is None:
         conn.execute("INSERT INTO meta(key,value) VALUES('schema_version',?)",
                      (str(SCHEMA_VERSION),))
+    else:
+        conn.execute("UPDATE meta SET value=? WHERE key='schema_version'",
+                     (str(SCHEMA_VERSION),))
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring an existing library up to the current schema.
+
+    Everything in SCHEMA is CREATE ... IF NOT EXISTS, which creates missing
+    *tables* but never adds a column to one that already exists. A library
+    written by an older Chronicle therefore needs its new columns added by
+    hand, or every query mentioning one fails on the user's real archive
+    while passing on a freshly-created test database.
+    """
+    for table, column, ddl in (
+        ("reading_state", "skipped_at", "TEXT"),
+    ):
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        # An empty PRAGMA means the table does not exist yet -- a brand new
+        # library, where SCHEMA is about to create it with the column already
+        # in place. Nothing to migrate.
+        if cols and column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 # --------------------------------------------------------------------------
@@ -465,7 +497,7 @@ QUEUE_SELECT = """
 SELECT a.id, a.title, a.url, a.published_at, a.date_precision, a.date_confidence,
        a.date_source, a.excerpt, a.word_count, a.image_count, a.content_status,
        a.source_id, s.name AS source_name, s.slug AS source_slug,
-       r.read_at, r.favourite_at, r.scroll_pos,
+       r.read_at, r.favourite_at, r.scroll_pos, r.skipped_at,
        (SELECT COUNT(*) FROM highlights h WHERE h.article_id = a.id) AS highlight_count,
        (SELECT COUNT(*) FROM notes n WHERE n.article_id = a.id) AS note_count,
        -- What the reader wrote, for the queue to show a line of. Their own
@@ -495,7 +527,12 @@ ORDER_CHRONO_DESC = " ORDER BY (a.published_at IS NULL), a.published_at DESC, a.
 #
 # Hide-read is a tool for working through the queue. These scopes are not a
 # queue; they are collections you asked for by name.
-HIDE_READ_EXEMPT = ("read", "favourites", "annotated")
+HIDE_READ_EXEMPT = ("read", "favourites", "annotated", "skipped")
+
+# Scopes that are *about* skipped articles, and so must not have them hidden.
+# Everywhere else a skip means "take this out of my way", which is the whole
+# point of the button: the queue you work through should shrink.
+SKIP_EXEMPT = ("skipped",)
 
 
 def _filter_sql(scope: str, include_disabled: bool,
@@ -510,6 +547,8 @@ def _filter_sql(scope: str, include_disabled: bool,
         where.append("r.read_at IS NOT NULL")
     elif scope == "favourites":
         where.append("r.favourite_at IS NOT NULL")
+    elif scope == "skipped":
+        where.append("r.skipped_at IS NOT NULL")
     elif scope == "annotated":
         # Anything the reader wrote on: a note about the article, a
         # highlight, or a note attached to a highlight.
@@ -517,6 +556,11 @@ def _filter_sql(scope: str, include_disabled: bool,
                      "OR EXISTS (SELECT 1 FROM highlights h WHERE h.article_id = a.id))")
     if hide_read and scope not in HIDE_READ_EXEMPT:
         where.append("r.read_at IS NULL")
+    # A skipped article is one the reader has dealt with, so it leaves the
+    # queue the same way it leaves the reading order -- except in the lists
+    # that exist to show it back to them.
+    if scope not in SKIP_EXEMPT:
+        where.append("r.skipped_at IS NULL")
     return " WHERE " + " AND ".join(where), args
 
 
@@ -545,18 +589,24 @@ def queue_counts(conn) -> dict[str, int]:
     base = ("FROM articles a JOIN sources s ON s.id=a.source_id "
             "LEFT JOIN reading_state r ON r.article_id=a.id "
             "WHERE s.enabled=1 AND a.content_status IN ('ok','partial','paywalled')")
+    # Skipped articles are counted apart, then excluded from every other
+    # figure: "1 234 articles · 800 unread" must describe the queue the
+    # reader actually has in front of them, not the one before they pruned it.
+    live = base + " AND r.skipped_at IS NULL"
     out = {}
-    out["all"] = conn.execute(f"SELECT COUNT(*) c {base}").fetchone()["c"]
-    out["unread"] = conn.execute(f"SELECT COUNT(*) c {base} AND r.read_at IS NULL").fetchone()["c"]
+    out["skipped"] = conn.execute(
+        f"SELECT COUNT(*) c {base} AND r.skipped_at IS NOT NULL").fetchone()["c"]
+    out["all"] = conn.execute(f"SELECT COUNT(*) c {live}").fetchone()["c"]
+    out["unread"] = conn.execute(f"SELECT COUNT(*) c {live} AND r.read_at IS NULL").fetchone()["c"]
     out["read"] = out["all"] - out["unread"]
     out["favourites"] = conn.execute(
-        f"SELECT COUNT(*) c {base} AND r.favourite_at IS NOT NULL").fetchone()["c"]
+        f"SELECT COUNT(*) c {live} AND r.favourite_at IS NOT NULL").fetchone()["c"]
     out["annotated"] = conn.execute(
-        f"SELECT COUNT(*) c {base} AND (EXISTS (SELECT 1 FROM notes n "
+        f"SELECT COUNT(*) c {live} AND (EXISTS (SELECT 1 FROM notes n "
         f"WHERE n.article_id = a.id) OR EXISTS (SELECT 1 FROM highlights h "
         f"WHERE h.article_id = a.id))").fetchone()["c"]
     out["undated"] = conn.execute(
-        f"SELECT COUNT(*) c {base} AND a.published_at IS NULL").fetchone()["c"]
+        f"SELECT COUNT(*) c {live} AND a.published_at IS NULL").fetchone()["c"]
     return out
 
 
@@ -642,6 +692,40 @@ def toggle_favourite(conn, article_id: int) -> bool:
     conn.execute("UPDATE reading_state SET favourite_at=? WHERE article_id=?",
                  (now, article_id))
     return now is not None
+
+
+def set_skipped(conn, article_id: int, skipped: bool = True) -> None:
+    """Pass an article over, or put it back in the queue.
+
+    A skip is deliberately *not* a read: the reader is saying this one was not
+    worth their time, which is the judgement the per-blog percentage reports.
+    Marking it read as well would make the two indistinguishable.
+    """
+    _ensure_state(conn, article_id)
+    conn.execute("UPDATE reading_state SET skipped_at=? WHERE article_id=?",
+                 (utcnow() if skipped else None, article_id))
+
+
+def is_skipped(conn, article_id: int) -> bool:
+    row = conn.execute("SELECT skipped_at FROM reading_state WHERE article_id=?",
+                       (article_id,)).fetchone()
+    return bool(row and row["skipped_at"])
+
+
+def skip_rates(conn) -> dict[int, tuple[int, int]]:
+    """(skipped, total) per source, over articles that are readable at all.
+
+    Pending and failed articles are left out of both figures: a blog half-way
+    through its first archive build would otherwise show a misleadingly low
+    percentage simply because most of it has not been fetched yet.
+    """
+    rows = conn.execute(
+        "SELECT a.source_id AS sid, COUNT(*) AS total, "
+        "       COUNT(r.skipped_at) AS skipped "
+        "FROM articles a LEFT JOIN reading_state r ON r.article_id = a.id "
+        "WHERE a.content_status IN ('ok','partial','paywalled') "
+        "GROUP BY a.source_id")
+    return {r["sid"]: (r["skipped"], r["total"]) for r in rows}
 
 
 def set_scroll(conn, article_id: int, pos: float) -> None:

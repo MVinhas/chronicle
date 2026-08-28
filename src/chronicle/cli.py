@@ -151,6 +151,8 @@ def cmd_stats(args) -> int:
     print(f"  queue         {_fmt_int(counts['all'])} readable, "
           f"{_fmt_int(counts['unread'])} unread, "
           f"{_fmt_int(counts['favourites'])} favourites")
+    if counts["skipped"]:
+        print(f"  skipped       {_fmt_int(counts['skipped'])}")
     if counts["undated"]:
         print(f"  undated       {_fmt_int(counts['undated'])}")
     print()
@@ -247,7 +249,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     q = sub.add_parser("queue", help="show the reading queue")
     q.add_argument("--scope", default="all",
-                   choices=["all", "unread", "read", "favourites"])
+                   choices=["all", "unread", "read", "favourites",
+                            "annotated", "skipped"])
     q.add_argument("--limit", type=int, default=40)
     q.set_defaults(fn=cmd_queue)
 

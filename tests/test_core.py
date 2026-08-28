@@ -449,6 +449,60 @@ class TestQueue(unittest.TestCase):
         nxt = self.db.neighbour(self.conn, a, +1, hide_read=True)
         self.assertEqual(nxt["id"], c)
 
+    # -- skipping ---------------------------------------------------------
+
+    def test_skipping_takes_an_article_out_of_the_queue(self):
+        """The point of the button: the queue you work through shrinks."""
+        self.add("a", "2001-01-01T00:00:00")
+        b = self.add("b", "2002-01-01T00:00:00")
+        self.db.set_skipped(self.conn, b, True)
+
+        self.assertEqual([r["title"] for r in self.db.queue(self.conn)], ["a"])
+        self.assertEqual(self.db.queue_counts(self.conn)["all"], 1)
+        self.assertEqual(self.db.queue_counts(self.conn)["skipped"], 1)
+
+    def test_a_skip_is_not_a_read(self):
+        """Conflating them would make the per-blog percentage unanswerable."""
+        a = self.add("a", "2001-01-01T00:00:00")
+        self.db.set_skipped(self.conn, a, True)
+        self.assertTrue(self.db.is_skipped(self.conn, a))
+        row = self.conn.execute(
+            "SELECT read_at FROM reading_state WHERE article_id=?", (a,)).fetchone()
+        self.assertIsNone(row["read_at"])
+
+    def test_the_skipped_scope_shows_them_back(self):
+        a = self.add("a", "2001-01-01T00:00:00")
+        self.add("b", "2002-01-01T00:00:00")
+        self.db.set_skipped(self.conn, a, True)
+        self.assertEqual(
+            [r["title"] for r in self.db.queue(self.conn, scope="skipped")], ["a"])
+
+    def test_unskipping_restores_the_article(self):
+        a = self.add("a", "2001-01-01T00:00:00")
+        self.db.set_skipped(self.conn, a, True)
+        self.db.set_skipped(self.conn, a, False)
+        self.assertEqual(len(self.db.queue(self.conn)), 1)
+        self.assertEqual(self.db.queue_counts(self.conn)["skipped"], 0)
+
+    def test_navigation_passes_over_skipped_articles(self):
+        a = self.add("a", "2001-01-01T00:00:00")
+        b = self.add("b", "2002-01-01T00:00:00")
+        c = self.add("c", "2003-01-01T00:00:00")
+        self.db.set_skipped(self.conn, b, True)
+        self.assertEqual(self.db.neighbour(self.conn, a, +1)["id"], c)
+
+    def test_skip_rate_counts_only_readable_articles(self):
+        """A half-built archive must not read as a low skip rate."""
+        a = self.add("a", "2001-01-01T00:00:00")
+        self.add("b", "2002-01-01T00:00:00")
+        pending, _ = self.db.upsert_article(
+            self.conn, self.sid, "p", url="https://t.example/p", title="p",
+            published_at="2003-01-01T00:00:00")
+        self.db.set_skipped(self.conn, a, True)
+
+        skipped, total = self.db.skip_rates(self.conn)[self.sid]
+        self.assertEqual((skipped, total), (1, 2))
+
     def test_disabled_source_leaves_the_queue(self):
         self.add("a", "2001-01-01T00:00:00")
         self.db.set_source_enabled(self.conn, self.sid, False)
@@ -459,6 +513,66 @@ class TestQueue(unittest.TestCase):
         self.add("b", "2002-01-01T00:00:00", title="Taste for Makers")
         hits = self.db.queue(self.conn, search="averages")
         self.assertEqual([r["title"] for r in hits], ["Beating the Averages"])
+
+
+class TestMigration(unittest.TestCase):
+    """Opening a library written by an older Chronicle must not break it."""
+
+    def setUp(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+
+    def tearDown(self):
+        os.unlink(self.tmp.name)
+
+    def _old_library(self):
+        """A v2 reading_state: no skipped_at column."""
+        import sqlite3
+        conn = sqlite3.connect(self.tmp.name)
+        conn.executescript("""
+            CREATE TABLE reading_state (
+                article_id INTEGER PRIMARY KEY, read_at TEXT,
+                favourite_at TEXT, scroll_pos REAL NOT NULL DEFAULT 0,
+                last_opened_at TEXT);
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta VALUES('schema_version','2');
+            INSERT INTO reading_state(article_id, read_at, scroll_pos)
+                VALUES(7,'2020-01-01T00:00:00', 0.5);
+        """)
+        conn.commit()
+        conn.close()
+
+    def test_the_new_column_is_added_to_an_existing_library(self):
+        from chronicle import db
+        self._old_library()
+        conn = db.connect(self.tmp.name)
+        db.init(conn)
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(reading_state)")}
+        self.assertIn("skipped_at", cols)
+        conn.close()
+
+    def test_existing_reading_state_survives(self):
+        """A migration that lost where the reader had got to would be worse
+        than no migration at all."""
+        from chronicle import db
+        self._old_library()
+        conn = db.connect(self.tmp.name)
+        db.init(conn)
+        row = conn.execute("SELECT * FROM reading_state WHERE article_id=7").fetchone()
+        self.assertEqual(row["read_at"], "2020-01-01T00:00:00")
+        self.assertEqual(row["scroll_pos"], 0.5)
+        self.assertIsNone(row["skipped_at"])
+        conn.close()
+
+    def test_opening_twice_is_harmless(self):
+        from chronicle import db
+        self._old_library()
+        conn = db.connect(self.tmp.name)
+        db.init(conn)
+        db.init(conn)
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(reading_state)")]
+        self.assertEqual(cols.count("skipped_at"), 1)
+        conn.close()
 
 
 class TestPaulGraham(unittest.TestCase):
