@@ -503,6 +503,32 @@ class TestQueue(unittest.TestCase):
         skipped, total = self.db.skip_rates(self.conn)[self.sid]
         self.assertEqual((skipped, total), (1, 2))
 
+    # -- highlights list ----------------------------------------------------
+
+    def test_highlighted_scope_lists_only_marked_articles(self):
+        a = self.add("a", "2001-01-01T00:00:00")
+        b = self.add("b", "2002-01-01T00:00:00")
+        self.db.add_highlight(self.conn, a, "a marked passage")
+        self.db.set_note(self.conn, b, "a note, but nothing highlighted")
+
+        self.assertEqual(
+            [r["title"] for r in self.db.queue(self.conn, scope="highlighted")], ["a"])
+        # Notes still lists both -- the two lists answer different questions.
+        self.assertEqual(
+            [r["title"] for r in self.db.queue(self.conn, scope="annotated")], ["a", "b"])
+        self.assertEqual(self.db.queue_counts(self.conn)["highlighted"], 1)
+
+    def test_highlight_list_prefers_the_marked_passage(self):
+        """In the Highlights list the passage is the point, not the note."""
+        from chronicle.ui.style import note_line
+        a = self.add("a", "2001-01-01T00:00:00")
+        self.db.add_highlight(self.conn, a, "the words they marked")
+        self.db.set_note(self.conn, a, "a note about the whole article")
+        row = self.db.queue(self.conn, scope="highlighted")[0]
+
+        self.assertIn("the words they marked", note_line(row, prefer_mark=True))
+        self.assertIn("a note about the whole article", note_line(row))
+
     def test_disabled_source_leaves_the_queue(self):
         self.add("a", "2001-01-01T00:00:00")
         self.db.set_source_enabled(self.conn, self.sid, False)

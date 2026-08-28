@@ -68,7 +68,8 @@ class LibraryView(Gtk.Box):
         first = None
         for scope, label in (("all", "All"), ("unread", "Unread"),
                              ("favourites", "Favourites"), ("annotated", "Notes"),
-                             ("read", "Read"), ("skipped", "Skipped")):
+                             ("highlighted", "Highlights"), ("read", "Read"),
+                             ("skipped", "Skipped")):
             btn = Gtk.ToggleButton(label=label)
             btn.add_css_class("chronicle-filter")
             if first is None:
@@ -216,7 +217,7 @@ class LibraryView(Gtk.Box):
 
         # Rows are recycled as the list scrolls, so this has to be cleared on
         # articles without one -- otherwise a note bleeds onto a later row.
-        written = note_line(row)
+        written = note_line(row, prefer_mark=self.scope == "highlighted")
         note.set_label(written)
         note.set_visible(bool(written))
         note.set_tooltip_text(written or None)
@@ -265,6 +266,10 @@ class LibraryView(Gtk.Box):
             "favourites": ("No favourites yet",
                            "Press F while reading, or the star in the "
                            "reader's bottom bar, to keep an article here."),
+            "highlighted": ("No highlights yet",
+                            "Select any passage while you are reading to "
+                            "highlight it. Every passage you mark collects "
+                            "here, with the article it came from."),
             "unread": ("Nothing unread",
                        "You have read everything in the queue."),
             "read": ("Nothing read yet",
@@ -278,6 +283,7 @@ class LibraryView(Gtk.Box):
             blurb = ("Nothing here", "No articles match this filter.")
         self.empty.set_icon_name({
             "annotated": "format-text-rich-symbolic",
+            "highlighted": "format-text-rich-symbolic",
             "skipped": "go-jump-symbolic",
         }.get(self.scope, "view-list-symbolic"))
         self.empty.set_title(blurb[0])

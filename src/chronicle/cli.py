@@ -250,7 +250,7 @@ def build_parser() -> argparse.ArgumentParser:
     q = sub.add_parser("queue", help="show the reading queue")
     q.add_argument("--scope", default="all",
                    choices=["all", "unread", "read", "favourites",
-                            "annotated", "skipped"])
+                            "annotated", "highlighted", "skipped"])
     q.add_argument("--limit", type=int, default=40)
     q.set_defaults(fn=cmd_queue)
 

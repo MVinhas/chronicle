@@ -527,7 +527,7 @@ ORDER_CHRONO_DESC = " ORDER BY (a.published_at IS NULL), a.published_at DESC, a.
 #
 # Hide-read is a tool for working through the queue. These scopes are not a
 # queue; they are collections you asked for by name.
-HIDE_READ_EXEMPT = ("read", "favourites", "annotated", "skipped")
+HIDE_READ_EXEMPT = ("read", "favourites", "annotated", "highlighted", "skipped")
 
 # Scopes that are *about* skipped articles, and so must not have them hidden.
 # Everywhere else a skip means "take this out of my way", which is the whole
@@ -554,6 +554,10 @@ def _filter_sql(scope: str, include_disabled: bool,
         # highlight, or a note attached to a highlight.
         where.append("(EXISTS (SELECT 1 FROM notes n WHERE n.article_id = a.id) "
                      "OR EXISTS (SELECT 1 FROM highlights h WHERE h.article_id = a.id))")
+    elif scope == "highlighted":
+        # Passages the reader marked in the prose, as distinct from the Notes
+        # list: an article can carry a note and no highlight, or the reverse.
+        where.append("EXISTS (SELECT 1 FROM highlights h WHERE h.article_id = a.id)")
     if hide_read and scope not in HIDE_READ_EXEMPT:
         where.append("r.read_at IS NULL")
     # A skipped article is one the reader has dealt with, so it leaves the
@@ -605,6 +609,9 @@ def queue_counts(conn) -> dict[str, int]:
         f"SELECT COUNT(*) c {live} AND (EXISTS (SELECT 1 FROM notes n "
         f"WHERE n.article_id = a.id) OR EXISTS (SELECT 1 FROM highlights h "
         f"WHERE h.article_id = a.id))").fetchone()["c"]
+    out["highlighted"] = conn.execute(
+        f"SELECT COUNT(*) c {live} AND EXISTS (SELECT 1 FROM highlights h "
+        f"WHERE h.article_id = a.id)").fetchone()["c"]
     out["undated"] = conn.execute(
         f"SELECT COUNT(*) c {live} AND a.published_at IS NULL").fetchone()["c"]
     return out

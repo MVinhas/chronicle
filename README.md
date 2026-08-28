@@ -97,7 +97,8 @@ While the note box has focus the single-key reading shortcuts stand down, so
 you can type freely; `Esc` leaves the box and saves what you wrote.
 
 The library has a **Notes** filter listing everything you annotated, with what
-you wrote shown under each article.
+you wrote shown under each article, and a **Highlights** filter listing just
+the passages you marked.
 
 All of it stays on your machine, and an archive update never overwrites it.
 
