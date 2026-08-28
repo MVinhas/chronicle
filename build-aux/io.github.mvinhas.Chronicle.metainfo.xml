@@ -99,6 +99,24 @@
   </recommends>
 
   <releases>
+    <release version="1.6.0" date="2026-08-28">
+      <description>
+        <ul>
+          <li>Skip an article. Press S, or the button beside Favourite, and Chronicle passes the article over and opens the next one. A skip is not a read — it is a verdict on the piece rather than a record that you got through it — so the two are kept apart, and skipped articles leave the queue instead of cluttering it. There is an Undo on the way out, and a <em>Skipped</em> filter that lists them and puts any of them back.</li>
+          <li>Each blog now shows what proportion of it you have skipped, so the list of blogs you follow can be pruned on evidence rather than on a hunch. The figure counts only articles Chronicle can actually show you, so a half-built archive does not read as a low rate, and it is withheld below five articles, where a percentage says nothing.</li>
+          <li>A <em>Highlights</em> filter in the library, listing the passages you marked. It is deliberately not the same list as Notes: an article can carry a note and no highlight, or a highlight and no note. Each row shows the passage itself rather than your note about the article, since in this list the marked words are the point.</li>
+          <li>Fixed a blog added by a category or tag address (such as a WordPress <code>/category/…/</code> page) archiving nothing at all. Those listings sit at one address while every post they link to lives at the site root, so scoping the blog to that path rejected every article it found — silently. A section index now vouches for the articles it lists, across its pagination, while still never pulling in the rest of the site.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.5.1" date="2026-08-27">
+      <description>
+        <ul>
+          <li>Chronicle now picks up where you left off. Quitting mid-article and reopening put you back at the top, and worse, that near-zero position was then saved over the one it should have restored — so each launch erased the place it was meant to remember. The bottom bar says when it has put you back, for a few seconds.</li>
+          <li>The reading time in the bottom bar is now the time remaining, rather than the length of the whole article, once you are into it.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.5.0" date="2026-08-27">
       <description>
         <ul>
