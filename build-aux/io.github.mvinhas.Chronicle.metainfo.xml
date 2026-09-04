@@ -99,6 +99,16 @@
   </recommends>
 
   <releases>
+    <release version="1.7.0" date="2026-09-04">
+      <description>
+        <ul>
+          <li>Select a word while reading and Chronicle can define it, without taking you anywhere. The definition arrives as a card on the page itself — the senses, the part of speech and an example — the way an e-reader does it, rather than as a browser tab you then have to find your way back from.</li>
+          <li>Definitions come from Wiktionary and are kept in your library once fetched, so a word you have looked up once stays defined with the network off. That is the same bargain the articles are stored under, and it is why the lookup is worth having in a reader that works on a train.</li>
+          <li>The selection popup now also offers a web search, and still offers Highlight — which the dictionary card keeps offering too, so looking a word up does not cost you the passage you had marked out. A search is the one thing here that opens your browser.</li>
+          <li>Define is offered for a single word only. No dictionary has an entry for a sentence, and a button that always failed would be worse than no button.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.6.0" date="2026-08-28">
       <description>
         <ul>

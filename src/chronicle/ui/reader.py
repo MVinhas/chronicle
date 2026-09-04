@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import threading
 import time
+import urllib.parse
 from pathlib import Path
 
 import gi
@@ -14,7 +16,7 @@ gi.require_version("Adw", "1")
 gi.require_version("WebKit", "6.0")
 from gi.repository import Gio, GLib, GObject, Gtk, WebKit  # noqa: E402
 
-from .. import db, images, paths  # noqa: E402
+from .. import db, dictionary, images, paths  # noqa: E402
 from . import style  # noqa: E402
 
 log = logging.getLogger("chronicle.reader")
@@ -226,6 +228,10 @@ class ReaderView(Gtk.Box):
             self.emit("scrolled", self._last_scroll)
         elif kind == "editing":
             self._set_editing(bool(payload.get("value")))
+        elif kind == "define":
+            self._define(payload.get("word") or "")
+        elif kind == "search":
+            self._search(payload.get("text") or "")
         elif kind in ("note", "highlight-add", "highlight-remove",
                       "highlight-note", "anchors"):
             self._on_annotation(kind, payload)
@@ -235,6 +241,66 @@ class ReaderView(Gtk.Box):
             return
         self._editing = editing
         self.emit("editing", editing)
+
+    # -- looking things up -------------------------------------------------
+
+    def _define(self, word: str) -> None:
+        """Answer the page's request for a definition.
+
+        A word already in the library is answered on the spot; anything else
+        needs the network, which cannot happen on this thread — the reader
+        would freeze mid-page for as long as the lookup took. The worker does
+        nothing but fetch: the library stays on the main thread, where there
+        is one connection rather than one per word looked up.
+        """
+        headword = dictionary.normalise(word)
+        if not headword:
+            return
+        entry = dictionary.cached(db.get_conn(), headword)
+        if entry is not None:
+            self._send_definition(headword, entry)
+            return
+        threading.Thread(target=self._define_worker, args=(headword,),
+                         daemon=True).start()
+
+    def _define_worker(self, headword: str) -> None:
+        try:
+            entry = dictionary.fetch(headword)
+        except OSError as exc:
+            log.debug("lookup of %r failed: %s", headword, exc)
+            # Not stored: a failure to reach Wiktionary says nothing about
+            # the word, and caching it would make the next attempt fail too.
+            entry = {"word": headword,
+                     "error": "Could not reach the dictionary."}
+        GLib.idle_add(self._settle_definition, headword, entry)
+
+    def _settle_definition(self, headword: str, entry: dict) -> bool:
+        if not entry.get("error"):
+            dictionary.remember(db.get_conn(), headword, entry)
+        return self._send_definition(headword, entry)
+
+    def _send_definition(self, headword: str, entry: dict) -> bool:
+        # `lookup` is the word that was asked about, which the dictionary's
+        # own headword need not match; the page uses it to drop an answer
+        # that arrived after the reader moved on.
+        payload = dict(entry, lookup=headword)
+        self._run_js(f"window.chronicleDefinition && "
+                     f"window.chronicleDefinition({json.dumps(payload)});")
+        return False
+
+    def _search(self, text: str) -> None:
+        """Hand the selected words to a web search, outside the application.
+
+        Reuses `link-activated` rather than adding a signal of its own: as far
+        as the window is concerned this is the same act — the page asked for
+        an address to be opened in the browser.
+        """
+        query = " ".join(text.split())[:300]
+        if not query:
+            return
+        self.emit("link-activated",
+                  "https://www.google.com/search?q=" +
+                  urllib.parse.quote_plus(query))
 
     # -- annotations -------------------------------------------------------
 

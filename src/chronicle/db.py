@@ -15,7 +15,7 @@ from typing import Any, Iterable, Sequence
 
 from . import paths
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -139,6 +139,16 @@ CREATE TABLE IF NOT EXISTS notes (
     article_id INTEGER PRIMARY KEY REFERENCES articles(id) ON DELETE CASCADE,
     body       TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL
+);
+
+-- Words looked up from the reading surface, kept so a definition read once
+-- is readable again with the network off -- the same bargain as the articles.
+-- A word the dictionary has no entry for is stored too: that is an answer,
+-- and asking again would only get it more slowly.
+CREATE TABLE IF NOT EXISTS definitions (
+    word       TEXT PRIMARY KEY,
+    payload    TEXT NOT NULL,
+    fetched_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS app_state (
@@ -285,6 +295,24 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # in place. Nothing to migrate.
         if cols and column not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
+# --------------------------------------------------------------------------
+# the reader's dictionary cache
+# --------------------------------------------------------------------------
+
+def get_definition(conn, word: str):
+    row = conn.execute("SELECT payload FROM definitions WHERE word=?",
+                       (word,)).fetchone()
+    return row["payload"] if row else None
+
+
+def set_definition(conn, word: str, payload: str) -> None:
+    conn.execute(
+        "INSERT INTO definitions(word, payload, fetched_at) VALUES(?,?,?) "
+        "ON CONFLICT(word) DO UPDATE SET payload=excluded.payload, "
+        "fetched_at=excluded.fetched_at",
+        (word, payload, utcnow()))
 
 
 # --------------------------------------------------------------------------

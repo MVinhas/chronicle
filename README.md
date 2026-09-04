@@ -84,9 +84,17 @@ working offline.
 
 ## Notes and highlights
 
-Select any passage while you're reading to highlight it, and click a highlight
-to attach a note to it. There's also a note box at the foot of every article
-for anything you want to say about the piece as a whole.
+Select any passage while you're reading and Chronicle offers what you might
+want to do with it: highlight it, look the word up, or search for it. Click a
+highlight to attach a note to it. There's also a note box at the foot of every
+article for anything you want to say about the piece as a whole.
+
+Selecting a single word adds **Define**, which brings a dictionary entry —
+pronunciation aside, the senses and an example — onto the page itself rather
+than sending you to a browser. Definitions come from Wiktionary and are kept
+in your library once fetched, so a word you have looked up stays defined with
+the network off. **Google** hands the selection to a web search, which is the
+one thing that does open your browser.
 
 Highlights are anchored to the words themselves rather than to a position in
 the file, so they stay put when a blog edits a post or Chronicle re-fetches it.

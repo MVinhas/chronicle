@@ -13,6 +13,8 @@ Driven entirely by environment variables so it never affects normal runs:
     CHRONICLE_SHOT_ARTICLE  article id to open, from the top, unscrolled
     CHRONICLE_SHOT_SCROLL   0..1 fraction to scroll the library list to
     CHRONICLE_SHOT_SCOPE    library filter to select (e.g. highlighted, skipped)
+    CHRONICLE_SHOT_SELECT   word to select in the article, raising its popup
+    CHRONICLE_SHOT_DEFINE   1 to then press Define, for the dictionary card
 
 CHRONICLE_DEMO=1 instead walks the window through a short scripted tour.
 Setting CHRONICLE_DEMO_FRAMES to a directory records that tour frame by frame,
@@ -22,6 +24,7 @@ captures only the application.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -127,6 +130,61 @@ def _record_frames(window, directory: str, fps: int) -> None:
     GLib.timeout_add(interval, snap)
 
 
+# Selecting text is the one reader interaction a screenshot cannot stage on
+# its own: the popup and the dictionary card only exist in response to a
+# pointer. This drives the same handlers a real selection does, from inside
+# the page, so what gets captured is the real control and not a mock-up.
+_SELECT_JS = """
+(function (word) {
+  var prose = document.querySelector('.prose');
+  if (!prose) return;
+  var walker = document.createTreeWalker(prose, NodeFilter.SHOW_TEXT, null), n;
+  while ((n = walker.nextNode())) {
+    var i = n.nodeValue.indexOf(word);
+    if (i < 0) continue;
+    var range = document.createRange();
+    range.setStart(n, i);
+    range.setEnd(n, i + word.length);
+    var sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    if (n.parentNode && n.parentNode.scrollIntoView) {
+      n.parentNode.scrollIntoView({ block: 'center' });
+    }
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    return;
+  }
+})(%s);
+"""
+
+_PRESS_JS = """
+Array.prototype.slice.call(document.querySelectorAll('#hl-pop button'))
+  .filter(function (b) { return b.textContent === %s; })
+  .forEach(function (b) {
+    b.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+  });
+"""
+
+
+def _select_in_reader(window, word: str, define: bool, delay: int = 1400) -> None:
+    reader = getattr(window, "reader", None)
+    if reader is None:
+        return
+
+    def select() -> bool:
+        reader._run_js(_SELECT_JS % json.dumps(word))
+        if define:
+            # Long enough for the button strip to exist, and for the lookup it
+            # starts to come back before the shutter.
+            GLib.timeout_add(600, lambda: reader._run_js(
+                _PRESS_JS % json.dumps("Define")) and False)
+        return False
+
+    # `load_html` is asynchronous: script evaluated the instant an article is
+    # opened runs against the page being replaced, and finds nothing.
+    GLib.timeout_add(delay, select)
+
+
 def _scroll_library(window, fraction: float, delay: int = 700) -> None:
     """Scroll the queue so a screenshot can show a representative stretch."""
     try:
@@ -225,6 +283,7 @@ def arm(window) -> None:
     size = os.environ.get("CHRONICLE_SHOT_SIZE")
     article = os.environ.get("CHRONICLE_SHOT_ARTICLE")
     scroll = os.environ.get("CHRONICLE_SHOT_SCROLL")
+    select = os.environ.get("CHRONICLE_SHOT_SELECT")
 
     if size:
         try:
@@ -251,6 +310,10 @@ def arm(window) -> None:
                     button.set_active(True)
             if scroll and page == "library":
                 _scroll_library(window, float(scroll))
+            if select and page == "reader":
+                _select_in_reader(
+                    window, select,
+                    os.environ.get("CHRONICLE_SHOT_DEFINE") == "1")
             # Let the page settle (WebKit paint, list realisation) before capture.
             GLib.timeout_add(int(delay * 1000 * 0.45), finish)
         except Exception:                             # noqa: BLE001

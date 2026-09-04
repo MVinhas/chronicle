@@ -1050,3 +1050,150 @@ class TestResumeScroll(unittest.TestCase):
         for stored in (None, 0.0, 0.01, 0.02, 0.03, 0.5, 1.0):
             if self._hint(stored):
                 self.assertGreater(self._scroll(stored), 0.0, stored)
+
+
+class TestDictionaryWords(unittest.TestCase):
+    """Which selections are worth offering a definition for."""
+
+    @staticmethod
+    def _word(text):
+        from chronicle import dictionary
+        return dictionary.normalise(text)
+
+    def test_a_single_word_is_a_lookup(self):
+        self.assertEqual(self._word("quixotic"), "quixotic")
+        self.assertEqual(self._word("  Quixotic  "), "quixotic")
+
+    def test_the_punctuation_a_selection_drags_in_is_dropped(self):
+        for text in ('"quixotic,"', "(quixotic)", "quixotic.", "‘quixotic’"):
+            self.assertEqual(self._word(text), "quixotic", text)
+
+    def test_a_possessive_is_looked_up_as_the_word_under_it(self):
+        self.assertEqual(self._word("reader's"), "reader")
+        self.assertEqual(self._word("reader’s"), "reader")
+
+    def test_punctuation_inside_a_word_is_kept(self):
+        self.assertEqual(self._word("ne'er-do-well"), "ne'er-do-well")
+
+    def test_a_phrase_is_not_a_lookup(self):
+        """No dictionary has an entry for a sentence; offering one would lie."""
+        for text in ("the most quixotic", "quixotic\nreader", "", "   "):
+            self.assertIsNone(self._word(text))
+
+    def test_things_that_are_not_words_are_not_looked_up(self):
+        for text in ("1832", "£40", "—", "http://example.com"):
+            self.assertIsNone(self._word(text), text)
+
+
+class TestDictionaryEntries(unittest.TestCase):
+    """Folding Wiktionary's answer into one card's worth."""
+
+    SAMPLE = {
+        "en": [
+            {"partOfSpeech": "Adjective", "language": "English",
+             "definitions": [
+                 {"definition": '<span class="usage-label-sense"></span> '
+                                'Possessing   or  acting with\n'
+                                '<a href="/wiki/idealism">idealism</a>.',
+                  "examples": ["a quixotic  scheme"]},
+                 {"definition": "Impulsive &amp; rash."},
+                 {"definition": "A third sense, beyond what a card shows."},
+             ]},
+            {"partOfSpeech": "Noun",
+             "definitions": [{"definition": "One who is quixotic."}]},
+        ],
+        # Same spelling in another language; the card is an English one.
+        "la": [{"partOfSpeech": "Verb",
+                "definitions": [{"definition": "Latin, and not wanted here."}]}],
+    }
+
+    def _parse(self, payload=None, word="quixotic"):
+        from chronicle import dictionary
+        return dictionary.parse(word, self.SAMPLE if payload is None else payload)
+
+    def test_the_card_carries_the_word_and_its_senses(self):
+        entry = self._parse()
+        self.assertEqual(entry["word"], "quixotic")
+        self.assertEqual(entry["senses"][0]["pos"], "adjective")
+        self.assertEqual(entry["senses"][0]["example"], "a quixotic scheme")
+
+    def test_markup_and_whitespace_from_wiktionary_are_stripped(self):
+        """Definitions arrive as page fragments; the card sets them as prose."""
+        senses = self._parse()["senses"]
+        self.assertEqual(senses[0]["definition"],
+                         "Possessing or acting with idealism.")
+        self.assertEqual(senses[1]["definition"], "Impulsive & rash.")
+
+    def test_only_the_english_entry_is_used(self):
+        """A word spelled the same in Latin brings the Latin entry back too."""
+        for sense in self._parse()["senses"]:
+            self.assertNotIn("Latin", sense["definition"])
+
+    def test_senses_are_capped_but_span_the_parts_of_speech(self):
+        from chronicle import dictionary
+        senses = self._parse()["senses"]
+        self.assertLessEqual(len(senses), dictionary.MAX_SENSES)
+        self.assertIn("noun", [s["pos"] for s in senses])
+
+    def test_a_repeated_definition_is_shown_once(self):
+        payload = {"en": [
+            {"partOfSpeech": "Noun", "definitions": [{"definition": "A thing."}]},
+            {"partOfSpeech": "Verb", "definitions": [{"definition": "A thing."}]},
+        ]}
+        self.assertEqual(len(self._parse(payload, "x")["senses"]), 1)
+
+    def test_a_sense_that_is_only_markup_is_dropped(self):
+        payload = {"en": [{"partOfSpeech": "Noun", "definitions": [
+            {"definition": '<span class="usage-label-sense"></span>'},
+            {"definition": "A real one."}]}]}
+        self.assertEqual([s["definition"] for s in self._parse(payload, "x")["senses"]],
+                         ["A real one."])
+
+    def test_nonsense_from_the_endpoint_yields_an_empty_entry(self):
+        """An unreadable answer must read as 'no entry', never as a crash."""
+        for payload in ({}, [], {"en": None}, {"en": [None]},
+                        {"en": [{"definitions": "not a list"}]}):
+            entry = self._parse(payload, "x")
+            self.assertEqual(entry["senses"], [], payload)
+            self.assertEqual(entry["word"], "x")
+
+
+class TestDictionaryCache(unittest.TestCase):
+    """A word looked up once stays readable with the network off."""
+
+    def setUp(self):
+        from chronicle import db
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.db = db
+        self.conn = db.connect(self.tmp.name)
+        db.init(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+        os.unlink(self.tmp.name)
+
+    def test_an_entry_roundtrips(self):
+        from chronicle import dictionary
+        self.assertIsNone(dictionary.cached(self.conn, "quixotic"))
+        self.db.set_definition(self.conn, "quixotic",
+                               '{"word": "quixotic", "senses": []}')
+        self.assertEqual(dictionary.cached(self.conn, "quixotic")["word"],
+                         "quixotic")
+
+    def test_a_word_with_no_entry_is_remembered_as_such(self):
+        """'No such word' is an answer; asking again only gets it slower."""
+        from chronicle import dictionary
+        dictionary.remember(self.conn, "zzzzzz", {"word": "zzzzzz", "senses": []})
+        self.assertEqual(dictionary.cached(self.conn, "zzzzzz")["senses"], [])
+
+    def test_remembering_a_word_twice_keeps_the_later_answer(self):
+        from chronicle import dictionary
+        dictionary.remember(self.conn, "x", {"word": "x", "senses": []})
+        dictionary.remember(self.conn, "x", {"word": "x", "senses": [{"pos": "noun"}]})
+        self.assertEqual(len(dictionary.cached(self.conn, "x")["senses"]), 1)
+
+    def test_a_corrupt_cache_row_is_treated_as_a_miss(self):
+        from chronicle import dictionary
+        self.db.set_definition(self.conn, "quixotic", "{not json")
+        self.assertIsNone(dictionary.cached(self.conn, "quixotic"))

@@ -402,6 +402,75 @@ mark.hl.has-note {
 }
 #hl-pop button:hover { background: var(--code-bg); }
 
+/* Looking a word up turns the same popup into a card. Kindle's bargain: the
+   definition comes to the page rather than the reader leaving for it. */
+#hl-pop.card {
+  white-space: normal;
+  width: 21rem;
+  max-width: 76vw;
+  padding: 0.8em 0.95em 0.55em;
+}
+.defn-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5em;
+  margin-bottom: 0.5em;
+}
+.defn-word {
+  font-family: var(--serif);
+  font-size: 0.94rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+.defn-phonetic { font-size: 0.68rem; color: var(--ink-faint); }
+.defn-close {
+  margin-left: auto;
+  padding: 0 0.3em !important;
+  font-size: 0.9rem;
+  line-height: 1;
+  color: var(--ink-faint) !important;
+}
+.defn-senses { margin: 0; padding: 0; list-style: none; }
+.defn-senses li { margin: 0 0 0.55em; }
+.defn-pos {
+  font-size: 0.6rem;
+  font-style: italic;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  margin-right: 0.45em;
+}
+.defn-body {
+  font-family: var(--serif);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.defn-example {
+  display: block;
+  font-family: var(--serif);
+  font-size: 0.74rem;
+  font-style: italic;
+  color: var(--ink-soft);
+  margin-top: 0.15em;
+}
+.defn-status { font-size: 0.72rem; color: var(--ink-soft); margin: 0 0 0.5em; }
+.defn-foot {
+  display: flex;
+  align-items: center;
+  gap: 0.15em;
+  margin-top: 0.55em;
+  padding-top: 0.45em;
+  border-top: 1px solid var(--rule);
+}
+.defn-foot button { padding: 0.3em 0.5em !important; }
+.defn-source {
+  margin-left: auto;
+  font-size: 0.58rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
 /* ---- the reader's own note, at the foot of the article ------------------ */
 
 .notes {
@@ -805,30 +874,150 @@ SCRIPT = r"""
 
   // ---- the popup --------------------------------------------------------
 
-  function hidePop() { pop.style.display = 'none'; pop.innerHTML = ''; }
+  // The popup is positioned in DOCUMENT coordinates, not viewport ones: a
+  // definition takes a moment to arrive, and the page may have scrolled by
+  // the time the card replaces the buttons that asked for it.
+  var popAnchor = null;
+  var pendingWord = null;
 
-  function showPop(rect, buttons) {
-    pop.innerHTML = '';
-    buttons.forEach(function (b) {
-      var el = document.createElement('button');
-      el.textContent = b.label;
-      el.addEventListener('mousedown', function (ev) {
-        ev.preventDefault();
-        ev.stopPropagation();
-        hidePop();
-        b.run();
-      });
-      pop.appendChild(el);
-    });
-    pop.style.display = 'block';
-    var top = rect.top + window.scrollY - pop.offsetHeight - 8;
-    if (top < window.scrollY + 4) top = rect.bottom + window.scrollY + 8;
-    var left = rect.left + window.scrollX + (rect.width / 2) - (pop.offsetWidth / 2);
+  function anchorOf(rect) {
+    return { top: rect.top + window.scrollY, bottom: rect.bottom + window.scrollY,
+             left: rect.left + window.scrollX, width: rect.width };
+  }
+
+  function placePop() {
+    if (!popAnchor) return;
+    var top = popAnchor.top - pop.offsetHeight - 8;
+    if (top < window.scrollY + 4) top = popAnchor.bottom + 8;
+    var left = popAnchor.left + (popAnchor.width / 2) - (pop.offsetWidth / 2);
     left = Math.max(6, Math.min(left, document.documentElement.clientWidth -
                                       pop.offsetWidth - 6));
     pop.style.top = top + 'px';
     pop.style.left = left + 'px';
   }
+
+  function hidePop() {
+    pop.style.display = 'none';
+    pop.innerHTML = '';
+    pop.className = '';
+    popAnchor = null;
+    pendingWord = null;
+  }
+
+  function button(label, run, className) {
+    var el = document.createElement('button');
+    el.textContent = label;
+    if (className) el.className = className;
+    el.addEventListener('mousedown', function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      run();
+    });
+    return el;
+  }
+
+  function showPop(rect, buttons) {
+    pop.className = '';
+    pop.innerHTML = '';
+    buttons.forEach(function (b) {
+      pop.appendChild(button(b.label, function () { hidePop(); b.run(); }));
+    });
+    pop.style.display = 'block';
+    popAnchor = anchorOf(rect);
+    placePop();
+  }
+
+  // ---- the dictionary card ----------------------------------------------
+  //
+  // The same popup, widened: word, pronunciation and a few senses, with the
+  // other things you might do with the selection kept along the foot so the
+  // card is not a dead end.
+
+  function showCard(state) {
+    pop.className = 'card';
+    pop.innerHTML = '';
+
+    var head = document.createElement('div');
+    head.className = 'defn-head';
+    var word = document.createElement('span');
+    word.className = 'defn-word';
+    word.textContent = state.word;
+    head.appendChild(word);
+    if (state.phonetic) {
+      var ph = document.createElement('span');
+      ph.className = 'defn-phonetic';
+      ph.textContent = state.phonetic;
+      head.appendChild(ph);
+    }
+    head.appendChild(button('×', hidePop, 'defn-close'));
+    pop.appendChild(head);
+
+    if (state.status === 'loading' || state.error || !state.senses ||
+        !state.senses.length) {
+      var status = document.createElement('p');
+      status.className = 'defn-status';
+      status.textContent = state.status === 'loading' ? 'Looking it up…'
+        : (state.error || 'No dictionary entry for this word.');
+      pop.appendChild(status);
+    } else {
+      var list = document.createElement('ul');
+      list.className = 'defn-senses';
+      state.senses.forEach(function (sense) {
+        var li = document.createElement('li');
+        if (sense.pos) {
+          var pos = document.createElement('span');
+          pos.className = 'defn-pos';
+          pos.textContent = sense.pos;
+          li.appendChild(pos);
+        }
+        var body = document.createElement('span');
+        body.className = 'defn-body';
+        body.textContent = sense.definition;
+        li.appendChild(body);
+        if (sense.example) {
+          var ex = document.createElement('span');
+          ex.className = 'defn-example';
+          ex.textContent = '“' + sense.example + '”';
+          li.appendChild(ex);
+        }
+        list.appendChild(li);
+      });
+      pop.appendChild(list);
+    }
+
+    var foot = document.createElement('div');
+    foot.className = 'defn-foot';
+    if (state.actions) {
+      state.actions.forEach(function (a) {
+        foot.appendChild(button(a.label, function () { hidePop(); a.run(); }));
+      });
+    }
+    if (state.senses && state.senses.length && state.source) {
+      var credit = document.createElement('span');
+      credit.className = 'defn-source';
+      credit.textContent = state.source;
+      foot.appendChild(credit);
+    }
+    pop.appendChild(foot);
+
+    pop.style.display = 'block';
+    placePop();
+  }
+
+  // What the card offers along its foot, captured when the lookup was asked
+  // for so the card can still act on a selection that has since been let go.
+  var cardActions = [];
+
+  // Answered by the app, from the library if the word has been looked up
+  // before and from the network if not. A reply for a word the reader has
+  // moved on from is dropped rather than shown over whatever is there now.
+  window.chronicleDefinition = function (entry) {
+    if (!entry || !pendingWord || !pop.classList.contains('card')) return;
+    if ((entry.lookup || entry.word || '').toLowerCase() !== pendingWord) return;
+    showCard({ word: entry.word || pendingWord, phonetic: entry.phonetic || '',
+               senses: entry.senses || [], source: entry.source || '',
+               error: entry.error || '', actions: cardActions });
+  };
 
   document.addEventListener('mouseup', function (ev) {
     if (pop.contains(ev.target)) return;
@@ -853,17 +1042,46 @@ SCRIPT = r"""
       var prefix = raw.slice(Math.max(0, start - 40), start);
       var suffix = raw.slice(start + sel.toString().length,
                              start + sel.toString().length + 40);
+      var rect = range.getBoundingClientRect();
 
-      showPop(range.getBoundingClientRect(), [{
-        label: 'Highlight',
-        run: function () {
-          send({ type: 'highlight-add', quote: quote, prefix: prefix,
-                 suffix: suffix, start_offset: start });
-          sel.removeAllRanges();
-        }
-      }]);
+      function markIt() {
+        send({ type: 'highlight-add', quote: quote, prefix: prefix,
+               suffix: suffix, start_offset: start });
+        sel.removeAllRanges();
+      }
+      function searchIt() {
+        send({ type: 'search', text: quote });
+        sel.removeAllRanges();
+      }
+
+      var buttons = [{ label: 'Highlight', run: markIt }];
+      var word = headword(quote);
+      if (word) {
+        buttons.push({ label: 'Define', run: function () {
+          // The card keeps offering what the buttons offered, so looking a
+          // word up does not cost you the selection you made.
+          cardActions = [{ label: 'Highlight', run: markIt },
+                         { label: 'Google', run: searchIt }];
+          popAnchor = anchorOf(rect);
+          pendingWord = word;
+          showCard({ word: quote, status: 'loading', actions: cardActions });
+          send({ type: 'define', word: word });
+        } });
+      }
+      buttons.push({ label: 'Google', run: searchIt });
+      showPop(rect, buttons);
     }, 0);
   });
+
+  // A single word, lowercased, or '' when the selection is a phrase. Mirrors
+  // dictionary.normalise() on the Python side; the app checks again before
+  // asking anyone, this only decides whether to offer the button.
+  function headword(quote) {
+    var word = quote.replace(/’/g, "'").replace(/^[^\w']+|[^\w']+$/g, '');
+    if (!word || /\s/.test(word)) return '';
+    word = word.toLowerCase().replace(/'s$/, '');
+    return /^[a-z][a-z'\-]{0,40}$/.test(word) ? word : '';
+  }
 
   document.addEventListener('mousedown', function (ev) {
     if (pop.contains(ev.target)) return;
@@ -880,7 +1098,16 @@ SCRIPT = r"""
     ]);
   });
 
-  window.addEventListener('scroll', hidePop, { passive: true });
+  // The button strip is transient and goes when the page moves under it. The
+  // card was asked for, so it stays until it is dismissed -- and since it is
+  // placed in document coordinates it travels with the words it defines.
+  window.addEventListener('scroll', function () {
+    if (!pop.classList.contains('card')) hidePop();
+  }, { passive: true });
+
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape' && pop.style.display === 'block') hidePop();
+  });
 
   // Applied by the app after the database has accepted a change, so what is
   // on screen is always what was actually stored.
