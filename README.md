@@ -82,19 +82,31 @@ It remembers where you got to.
 Articles are stored on your machine, images included, so everything keeps
 working offline.
 
+## Look a word up without leaving the page
+
+Select a word and press **Define**. The entry comes to the article — the
+senses, the part of speech, an example — the way an e-reader does it, instead
+of a browser tab you then have to find your way back from.
+
+<div align="center">
+  <img src="data/screenshots/lookup.png" width="90%" alt="Looking up a word while reading">
+</div>
+
+Definitions come from Wiktionary, and once fetched they're kept in your
+library. So a word you've looked up stays defined with the network off — the
+same bargain the articles themselves are stored under, and the reason this
+belongs in the reader rather than in a search engine.
+
+Define is offered for a single word only; no dictionary has an entry for a
+sentence. For anything longer there's **Google**, which is the one thing here
+that opens your browser.
+
 ## Notes and highlights
 
-Select any passage while you're reading and Chronicle offers what you might
-want to do with it: highlight it, look the word up, or search for it. Click a
-highlight to attach a note to it. There's also a note box at the foot of every
-article for anything you want to say about the piece as a whole.
-
-Selecting a single word adds **Define**, which brings a dictionary entry —
-pronunciation aside, the senses and an example — onto the page itself rather
-than sending you to a browser. Definitions come from Wiktionary and are kept
-in your library once fetched, so a word you have looked up stays defined with
-the network off. **Google** hands the selection to a web search, which is the
-one thing that does open your browser.
+The same popup offers **Highlight**, and the dictionary card goes on offering
+it too, so looking a word up doesn't cost you the passage you'd marked out.
+Click a highlight to attach a note to it. There's also a note box at the foot
+of every article for anything you want to say about the piece as a whole.
 
 Highlights are anchored to the words themselves rather than to a position in
 the file, so they stay put when a blog edits a post or Chronicle re-fetches it.

@@ -151,7 +151,12 @@ _SELECT_JS = """
     if (n.parentNode && n.parentNode.scrollIntoView) {
       n.parentNode.scrollIntoView({ block: 'center' });
     }
-    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    // After the scroll has settled, not before: the popup hides itself when
+    // the page moves under it, so a mouseup raised mid-scroll raises a strip
+    // that the scroll's own event then takes away again.
+    setTimeout(function () {
+      document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    }, 300);
     return;
   }
 })(%s);
@@ -176,7 +181,7 @@ def _select_in_reader(window, word: str, define: bool, delay: int = 1400) -> Non
         if define:
             # Long enough for the button strip to exist, and for the lookup it
             # starts to come back before the shutter.
-            GLib.timeout_add(600, lambda: reader._run_js(
+            GLib.timeout_add(900, lambda: reader._run_js(
                 _PRESS_JS % json.dumps("Define")) and False)
         return False
 
