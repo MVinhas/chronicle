@@ -49,6 +49,31 @@ host.
 if the site's markup is conventional, the base class handles extraction and
 sanitisation for you.
 
+### Rules for routine updates
+
+`discover()` is called for both jobs the app offers, and the difference is
+`ctx.newest_only`. Ignoring it is not a neutral choice: three adapters did, and
+"fetch new posts" quietly re-derived each site's entire history — gwern.net
+fetching all 669 of its pages to read one date from each, eight minutes of it.
+The button has to cost seconds, so pick whichever of these the site supports:
+
+- **Ask the server.** `ctx.since()` gives a cutoff, or `None` for a full scan.
+  An API that filters by date turns the whole update into one request —
+  WordPress takes `after=`, Ghost takes `filter=published_at:>…`.
+- **Stop early.** Read a newest-first route and give up as soon as
+  `ctx.predates_archive(stub.date)` is true.
+- **Enumerate by identity.** For a site with no dates to enumerate by at all,
+  skip candidates where `ctx.no_direct(guid)` is true — already archived, with
+  a body — or that are in `ctx.rejected`.
+
+And call `ctx.reject(guid)` for any page you fetched and found is not an
+article. Without that verdict every later sync pays a request to reach the same
+conclusion.
+
+Correctness never depends on the flag. A full scan must still find everything,
+and nothing may be *dropped* on these tests — they only decide what is worth
+asking for.
+
 ### Rules for dates
 
 This is the part that matters most, because dates decide reading order.
