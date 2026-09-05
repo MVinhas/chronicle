@@ -323,13 +323,13 @@ def _repair_c1(conn: sqlite3.Connection) -> None:
     # reads back one article at a time.
     scan = conn.execute(f"SELECT id, {columns} FROM articles")
     todo = [row["id"] for row in scan
-            if any(row[f] != net.repair_c1(row[f]) for f in fields if row[f])]
+            if any(net.has_c1(row[f]) for f in fields)]
 
     for article_id in todo:
         row = conn.execute(f"SELECT {columns} FROM articles WHERE id=?",
                            (article_id,)).fetchone()
         updates = {f: net.repair_c1(row[f]) for f in fields
-                   if row[f] and row[f] != net.repair_c1(row[f])}
+                   if net.has_c1(row[f])}
         conn.execute(
             "UPDATE articles SET %s WHERE id=?"
             % ", ".join(f"{f}=?" for f in updates),

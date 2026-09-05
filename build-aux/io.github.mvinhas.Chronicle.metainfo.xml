@@ -99,6 +99,14 @@
   </recommends>
 
   <releases>
+    <release version="1.7.4" date="2026-09-05">
+      <description>
+        <ul>
+          <li>Fixed a long, blank pause the first time Chronicle opened after 1.7.2. The one-off repair that release introduced took several seconds on a large library, all of it before the window appeared — long enough that launching from a dock or app grid looked like nothing had happened, and long enough to be tempted to give up, which only started the whole thing again next time.</li>
+          <li>The repair now looks for the damage before doing any work, which is around fourteen times faster on a full archive. What it repairs is unchanged, and a library it has already been through is not touched again.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.7.3" date="2026-09-05">
       <description>
         <ul>

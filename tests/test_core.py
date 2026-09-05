@@ -602,6 +602,32 @@ class TestMigration(unittest.TestCase):
         conn.close()
 
 
+    def test_text_beyond_repair_is_left_alone(self):
+        """Windows-1252 leaves five bytes undefined, and Gwern's archive holds
+        them inside upstream mojibake. There is nothing to map them back to, so
+        the migration passes over the row instead of rewriting it."""
+        from chronicle import db
+        conn = db.connect(self.tmp.name)
+        db.init(conn)
+        conn.execute("INSERT INTO sources(slug,name,plugin,added_at) "
+                     "VALUES('s','S','generic','2020-01-01T00:00:00')")
+        beyond = "<p>title=\"\u0081\u008f\u009d\"</p>"
+        conn.execute(
+            "INSERT INTO articles(id,source_id,guid,url,discovered_at,"
+            "title,content_html) "
+            "VALUES(1,1,'g','https://e.com/a','2020-01-01T00:00:00','T',?)",
+            (beyond,))
+        conn.execute("UPDATE meta SET value='4' WHERE key='schema_version'")
+        conn.commit()
+        conn.close()
+
+        conn = db.connect(self.tmp.name)
+        db.init(conn)
+        self.assertEqual(
+            conn.execute("SELECT content_html FROM articles WHERE id=1")
+            .fetchone()[0], beyond)
+        conn.close()
+
     def test_mis_decoded_text_is_repaired_on_open(self):
         """A library built before schema 5 has em dashes stored as U+0097."""
         from chronicle import db
@@ -695,6 +721,18 @@ class TestDecoding(unittest.TestCase):
         body = "dash \u0097 quote \u0092".encode()
         self.assertEqual(self.decode(body, "text/html; charset=utf-8"),
                          "dash \u2014 quote \u2019")
+
+    def test_the_fast_path_agrees_with_the_repair(self):
+        """has_c1 decides what the schema-5 migration touches and what every
+        decode skips, so it has to mean exactly "repair_c1 would change this".
+        Answering yes where the repair changes nothing rewrites rows to
+        themselves and miscounts them in the log."""
+        for text in ("plain text", "dash \u0097", "", None, "emoji \U0001F600",
+                     "\u0092s", "\u0081 \u008f \u009d", "dash \u0097 and \u0081",
+                     "\u007f and \u00a0 are not C1"):
+            self.assertEqual(net.has_c1(text),
+                             text is not None and net.repair_c1(text) != text,
+                             repr(text))
 
     def test_emoji_survive_every_route(self):
         for ctype in ("text/html", "text/html; charset=utf-8",

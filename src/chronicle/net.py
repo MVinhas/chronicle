@@ -94,9 +94,28 @@ _BOMS = ((codecs.BOM_UTF8, "utf-8-sig"),
          (codecs.BOM_UTF16_BE, "utf-16"))
 
 
+# Built from the repair table itself, not from the 0x80-0x9F range, so the
+# question it answers is exactly "would repair_c1 change this?". The five bytes
+# windows-1252 leaves undefined are not in it: text carrying only those is
+# beyond repair, and a caller told otherwise would rewrite a row to itself.
+_C1_RE = re.compile("[%s]" % "".join(chr(c) for c in sorted(_C1_REPAIR)))
+
+
+def has_c1(text: str | None) -> bool:
+    """Whether repair_c1 would change this text.
+
+    Separated from the repair because the two costs are nothing alike: the
+    search is a C-level scan, the translate allocates a new string a character
+    at a time. Almost no page needs repairing, and the callers that ask this --
+    every fetch during a sync, every article during the schema-5 migration --
+    are deciding what to touch across an entire library.
+    """
+    return bool(text) and _C1_RE.search(text) is not None
+
+
 def repair_c1(text: str) -> str:
     """Turn stray C1 control characters back into the punctuation they were."""
-    return text.translate(_C1_REPAIR) if text else text
+    return text.translate(_C1_REPAIR) if has_c1(text) else text
 
 
 def _codec(label: str | None) -> str | None:
