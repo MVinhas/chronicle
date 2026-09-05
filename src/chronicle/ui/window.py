@@ -19,6 +19,10 @@ from .style import (elide_url, reading_minutes,  # noqa: E402
 
 log = logging.getLogger("chronicle.window")
 
+# Seconds after the window appears before looking for new posts. Long
+# enough that the first thing the app does is draw itself.
+CATCH_UP_DELAY = 3
+
 # Reading past this fraction of an article counts as having read it.
 READ_THRESHOLD = 0.92
 
@@ -70,12 +74,20 @@ class MainWindow(Adw.ApplicationWindow):
 
         self.syncer = sync.Syncer(on_progress=self._on_sync_progress)
 
+        self._quiet_sync = False
+
         self._load_css()
         self._build_ui()
         self._follow_color_scheme()
         self._install_actions()
         self.refresh_library()
         self.resume()
+
+        # Catch up on what the blogs published, without being asked. Delayed
+        # rather than immediate: the window has to be up and interactive
+        # first, and by the time anyone has chosen something to read this has
+        # usually finished.
+        GLib.timeout_add_seconds(CATCH_UP_DELAY, self._catch_up)
 
     # -- infrastructure ----------------------------------------------------
 
@@ -725,6 +737,7 @@ class MainWindow(Adw.ApplicationWindow):
             self.toasts.add_toast(Adw.Toast(title="An update is already running",
                                             timeout=3))
             return
+        self._quiet_sync = False
         self.sync_button.set_sensitive(False)
         self.show_page("sources")
         threading.Thread(
@@ -732,21 +745,63 @@ class MainWindow(Adw.ApplicationWindow):
             args=(source_ids,), kwargs={"newest_only": not full_scan},
             daemon=True).start()
 
+    def _catch_up(self) -> bool:
+        """Fetch new posts for the blogs plausibly overdue, without being asked.
+
+        Deliberately after the window is on screen and on its own thread:
+        startup is the GUI thread and nothing here may hold it. It asks only
+        the blogs due by their own publishing rhythm (see sync.due_sources),
+        so opening the app does not question every server at once for news
+        none of them have -- on a typical launch that is one blog, not seven.
+
+        Quiet by design: it does not take you to the Blogs page, does not
+        interrupt what you were reading, and says nothing at all unless it
+        actually found something.
+        """
+        if self.syncer.running or not db.list_sources(self._conn, enabled_only=True):
+            return False
+        try:
+            due = sync.due_sources(self._conn)
+        except Exception:                             # noqa: BLE001
+            log.exception("could not work out which blogs are due")
+            return False
+        if not due:
+            return False
+        log.info("catching up on %d blog(s) in the background", len(due))
+        self._quiet_sync = True
+        threading.Thread(
+            target=self.syncer.sync_all,
+            args=(due,), kwargs={"newest_only": True},
+            daemon=True).start()
+        return False
+
     def _on_sync_progress(self, prog) -> None:
         GLib.idle_add(self._apply_progress, prog)
 
     def _apply_progress(self, prog) -> bool:
         self.sources_view.set_progress(prog)
         if prog.done:
+            quiet = self._quiet_sync
+            self._quiet_sync = False
             self.sync_button.set_sensitive(True)
             self.sources_view.reload()
             self.refresh_library()
             if prog.error:
-                self.toasts.add_toast(Adw.Toast(title=f"Update failed: {prog.error}",
-                                                timeout=8))
+                # A background catch-up that fails is not the user's problem to
+                # solve mid-sentence; it is on the blog's row either way.
+                if not quiet:
+                    self.toasts.add_toast(
+                        Adw.Toast(title=f"Update failed: {prog.error}", timeout=8))
+            elif quiet:
+                # Unprompted: speak only when there is something to say, and
+                # never move the reader out from under someone.
+                if prog.new:
+                    self.toasts.add_toast(Adw.Toast(
+                        title=f"{prog.new} new article{'s' if prog.new > 1 else ''}",
+                        timeout=4))
             else:
                 self.toasts.add_toast(Adw.Toast(title=prog.message, timeout=5))
-            if self.current is None:
+            if self.current is None and not quiet:
                 self.resume()
         return False
 

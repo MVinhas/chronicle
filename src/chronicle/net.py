@@ -222,6 +222,7 @@ class _HostLimiter:
     """
 
     def __init__(self, interval: float = 0.6):
+        self.base = interval
         self.interval = interval
         self._next: dict[str, float] = {}
         self._lock = threading.Lock()
@@ -241,7 +242,21 @@ _cancelled = threading.Event()
 
 
 def set_rate(interval: float) -> None:
-    _limiter.interval = max(0.0, interval)
+    _limiter.base = _limiter.interval = max(0.0, interval)
+
+
+def set_rate_scale(factor: float) -> None:
+    """Scale the polite interval, keeping the configured rate as the baseline.
+
+    Building a blog's archive for the first time is hundreds of pages of one
+    site, and this spacing is the entire cost of it -- worth going faster for
+    that one job, and back to the gentler rate for routine updates, which
+    fetch a handful of pages and are in no hurry.
+
+    Scaling rather than assigning matters: the tests set the rate to zero, and
+    a sync that assigned its own would make the whole suite wait in real time.
+    """
+    _limiter.interval = max(0.0, _limiter.base * max(0.0, factor))
 
 
 def cancel_all() -> None:

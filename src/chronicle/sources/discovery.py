@@ -127,11 +127,24 @@ class Report:
 # URL classification
 # --------------------------------------------------------------------------
 
+_TRAILING_SPACE_RE = re.compile(r"(?:%20|%09|%0[ad]|\s)+$", re.I)
+
+# Query keys that identify a post rather than a page of machinery.
+_ROOT_POST_KEYS = {"p", "page_id", "post", "post_id"}
+
+
 def classify_url(url: str) -> str:
     """'skip' (cannot be a post), or 'maybe' (worth considering)."""
     p = urlparse(url)
     path = p.path or "/"
-    if path == "/" and not p.query:
+    if path == "/" and not (parse_qsl(p.query) and
+                            {k for k, _ in parse_qsl(p.query)} & _ROOT_POST_KEYS):
+        # A query on the site root is a permalink only when it names a post:
+        # /?p=123 is how a WordPress site without pretty URLs links one.
+        # Everything else there is machinery -- a search, a feed, or
+        # mrmoneymustache.com's /?redirect_to=random, which answers with a
+        # *different* article every time and so can never be recognised as one
+        # already archived. It was refetched on every sync, forever.
         return "skip"
     if _ASSET_RE.search(path):
         return "skip"
@@ -419,7 +432,16 @@ def _links_from(page_url: str, base: str) -> list[tuple[str, str]]:
     host = urlparse(base).netloc.replace("www.", "")
     out, seen = [], set()
     for a in soup.find_all("a", href=True):
-        full = net.absolutise(page_url, a["href"]).split("#")[0]
+        # Trailing whitespace in an href is common in hand-written markup.
+        # Sometimes it is literal, sometimes the site has already encoded it
+        # (mrmoneymustache.com links "/road-trips/%20"), so both forms are
+        # trimmed. Left alone it is a second candidate for a page already
+        # listed, fetched again on every single sync.
+        href = a["href"].strip()
+        if not href:
+            continue
+        full = _TRAILING_SPACE_RE.sub(
+            "", net.absolutise(page_url, href).split("#")[0])
         p = urlparse(full)
         if p.netloc.replace("www.", "") != host:
             continue

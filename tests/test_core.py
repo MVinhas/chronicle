@@ -8,6 +8,7 @@ import os
 import re
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 
 from chronicle import dates, htmlutil, net
 from chronicle.sources.base import assess
@@ -1395,3 +1396,146 @@ class TestDictionaryCache(unittest.TestCase):
         from chronicle import dictionary
         self.db.set_definition(self.conn, "quixotic", "{not json")
         self.assertIsNone(dictionary.cached(self.conn, "quixotic"))
+
+
+class TestDueSources(unittest.TestCase):
+    """Which blogs are worth asking, unprompted, on opening the app.
+
+    Asking all of them every launch is what makes an automatic update
+    expensive; the point is to ask the ones plausibly overdue.
+    """
+
+    def setUp(self):
+        from chronicle import db
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.conn = db.connect(self.tmp.name)
+        db.init(self.conn)
+        self.now = datetime(2026, 9, 5, 12, 0, 0)
+
+    def tearDown(self):
+        self.conn.close()
+        os.unlink(self.tmp.name)
+
+    def _blog(self, slug, *, every_days, posts=12, last_sync_hours=0,
+              silent_days=0):
+        from chronicle import db
+        sid = db.add_source(self.conn, slug, slug, "generic", f"https://{slug}/")
+        newest = self.now - timedelta(days=silent_days)
+        for i in range(posts):
+            when = (newest - timedelta(days=every_days * i)).isoformat()
+            self.conn.execute(
+                "INSERT INTO articles(source_id,guid,url,title,published_at,"
+                "discovered_at) VALUES(?,?,?,?,?,?)",
+                (sid, f"{slug}-{i}", f"https://{slug}/{i}", f"P{i}", when,
+                 self.now.isoformat()))
+        self.conn.execute("UPDATE sources SET last_sync_at=? WHERE id=?",
+                          ((self.now - timedelta(hours=last_sync_hours)).isoformat(),
+                           sid))
+        self.conn.commit()
+        return sid
+
+    def _due(self):
+        from chronicle import sync
+        return set(sync.due_sources(self.conn, now=self.now))
+
+    def test_a_blog_never_synced_is_always_due(self):
+        from chronicle import db, sync
+        sid = db.add_source(self.conn, "new", "New", "generic", "https://new/")
+        self.conn.commit()
+        self.assertIn(sid, sync.due_sources(self.conn, now=self.now))
+
+    def test_a_daily_blog_is_asked_far_more_often_than_a_monthly_one(self):
+        daily = self._blog("daily", every_days=1, last_sync_hours=8)
+        monthly = self._blog("monthly", every_days=30, last_sync_hours=8)
+        due = self._due()
+        self.assertIn(daily, due)
+        self.assertNotIn(monthly, due)
+
+    def test_a_blog_just_checked_is_left_alone(self):
+        daily = self._blog("daily", every_days=1, last_sync_hours=0)
+        self.assertNotIn(daily, self._due())
+
+    def test_nothing_goes_unasked_for_longer_than_the_cap(self):
+        from chronicle import sync
+        slow = self._blog("slow", every_days=300,
+                          last_sync_hours=sync.MAX_CHECK.total_seconds() / 3600 + 1)
+        self.assertIn(slow, self._due())
+
+    def test_a_dormant_blog_is_not_treated_as_frequent(self):
+        """It posted weekly for a while and then stopped years ago. Its old
+        rhythm is not a reason to ask every few hours."""
+        dormant = self._blog("dormant", every_days=7, silent_days=900,
+                             last_sync_hours=6)
+        self.assertNotIn(dormant, self._due())
+
+    def test_too_little_history_means_just_look(self):
+        sparse = self._blog("sparse", every_days=5, posts=2, last_sync_hours=2)
+        self.assertIn(sparse, self._due())
+
+
+class TestRetryBackoff(unittest.TestCase):
+    """An article that keeps failing must not cost a request every sync."""
+
+    @staticmethod
+    def _row(found_days_ago, tried_hours_ago):
+        now = datetime(2026, 9, 5, 12, 0, 0)
+        return {"discovered_at": (now - timedelta(days=found_days_ago)).isoformat(),
+                "content_fetched_at": (now - timedelta(hours=tried_hours_ago)).isoformat()}
+
+    def _cooling(self, row):
+        from chronicle import sync
+        return sync._cooling(row, now=datetime(2026, 9, 5, 12, 0, 0))
+
+    def test_a_fresh_failure_is_retried_tomorrow_not_today(self):
+        self.assertTrue(self._cooling(self._row(0, 1)))
+        self.assertFalse(self._cooling(self._row(0, 25)))
+
+    def test_a_long_standing_failure_is_left_alone_for_much_longer(self):
+        """Failing for a year: a day later is far too soon to ask again."""
+        year = self._row(365, 24)
+        self.assertTrue(self._cooling(year))
+        self.assertFalse(self._cooling(self._row(365, 24 * 40)))
+
+    def test_the_wait_never_exceeds_the_cap(self):
+        from chronicle import sync
+        forever = self._row(10000, sync.MAX_RETRY.total_seconds() / 3600 + 1)
+        self.assertFalse(self._cooling(forever))
+
+    def test_a_page_never_tried_is_not_cooling(self):
+        self.assertFalse(self._cooling({"discovered_at": "2026-01-01T00:00:00",
+                                        "content_fetched_at": None}))
+
+
+class TestCandidateUrlHygiene(unittest.TestCase):
+    """Two URLs on mrmoneymustache.com were refetched on every single sync."""
+
+    @staticmethod
+    def _classify(url):
+        from chronicle.sources.discovery import classify_url
+        return classify_url(url)
+
+    def test_a_random_post_redirect_is_not_a_candidate(self):
+        """/?redirect_to=random answers with a different article every time,
+        so it can never be recognised as one already archived."""
+        self.assertEqual(
+            self._classify("https://x.com/?redirect_to=random&cache=900"), "skip")
+
+    def test_a_query_permalink_is_still_a_candidate(self):
+        """/?p=123 is how a WordPress site without pretty URLs links a post."""
+        for url in ("https://x.com/?p=123", "https://x.com/?page_id=7"):
+            self.assertEqual(self._classify(url), "maybe", url)
+
+    def test_the_bare_root_is_not_a_candidate(self):
+        for url in ("https://x.com/", "https://x.com/?s=search"):
+            self.assertEqual(self._classify(url), "skip", url)
+
+    def test_trailing_encoded_whitespace_is_trimmed(self):
+        from chronicle.sources.discovery import _TRAILING_SPACE_RE
+        self.assertEqual(
+            _TRAILING_SPACE_RE.sub("", "https://x.com/road-trips/%20"),
+            "https://x.com/road-trips/")
+        # An encoded space *inside* a path is part of the path.
+        self.assertEqual(
+            _TRAILING_SPACE_RE.sub("", "https://x.com/a%20b/c"),
+            "https://x.com/a%20b/c")

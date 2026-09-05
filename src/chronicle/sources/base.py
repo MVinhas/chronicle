@@ -113,10 +113,11 @@ class Context:
 
     def no_direct(self, guid: str) -> bool:
         """Should a direct page fetch be skipped? True when the article is
-        settled — or dated but permanently gone at the origin, where only a
-        new route (such as a feed-supplied body) is worth trying."""
+        settled — when it is dated but permanently gone at the origin, where
+        only a new route (such as a feed-supplied body) is worth trying — or
+        when it is failing and not yet due another attempt."""
         k = (self.known or {}).get(guid)
-        return bool(k and k[0] and k[1] in ("ok", "gone"))
+        return bool(k and k[0] and k[1] in ("ok", "gone", "cooling"))
 
     def known_rank(self, guid: str) -> int:
         """Confidence rank of the stored date for this article; -1 if none."""

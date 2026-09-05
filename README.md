@@ -154,7 +154,14 @@ guess, which blogs are earning their place in the queue.
 
 ## Keeping up to date
 
-Two different jobs, so two buttons:
+Chronicle catches up by itself. A few seconds after you open it — once the
+window is up, never before — it looks for new posts in the background, and
+says nothing unless it finds some. It doesn't ask every blog every time: it
+knows how often each one actually publishes, and asks a daily blog several
+times a day and a monthly one every few days. On a typical launch that's one
+blog, not all of them. Nothing goes unasked for more than three days.
+
+The buttons are still there for when you want to be sure:
 
 - **Fetch new posts** — what each blog has published since the last update, in
   seconds. How that is done depends on what the site offers: an API is simply

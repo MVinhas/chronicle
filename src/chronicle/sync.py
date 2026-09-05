@@ -14,11 +14,115 @@ import time
 import traceback
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 from . import db, htmlutil, images, net, sources
 from .sources.base import Cancelled, Context
 
 log = logging.getLogger("chronicle.sync")
+
+# Requests to one host are spaced apart to be polite. Building a blog's whole
+# archive is the one job where that spacing dominates -- 549 pages at 0.6s is
+# five and a half minutes -- so a first build runs at half the interval.
+FIRST_BUILD_RATE_SCALE = 0.5
+
+# How often to look at a blog, as a fraction of how often it actually posts.
+# A quarter means a daily blog is checked a few times a day and a monthly one
+# every few days: often enough to catch a post within a fraction of its own
+# cycle, seldom enough that opening the app does not question every server at
+# once for news none of them have.
+CHECK_FRACTION = 0.25
+MIN_CHECK = timedelta(hours=1)
+MAX_CHECK = timedelta(days=3)
+CADENCE_SAMPLE = 12        # recent posts used to measure the rhythm
+
+
+def _parse(iso: str | None) -> datetime | None:
+    try:
+        return datetime.fromisoformat(iso) if iso else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _cadence(conn, source_id: int) -> timedelta | None:
+    """How long this blog typically leaves between posts, or None if unclear.
+
+    The median gap rather than the mean: a blog that posted six times in one
+    week in 2013 and twice since should not be read as posting every few days.
+    """
+    stamps = [d for d in (_parse(r["published_at"]) for r in conn.execute(
+        "SELECT published_at FROM articles WHERE source_id=? AND published_at "
+        "IS NOT NULL ORDER BY published_at DESC LIMIT ?",
+        (source_id, CADENCE_SAMPLE))) if d]
+    if len(stamps) < 3:
+        return None
+    gaps = sorted(stamps[i] - stamps[i + 1] for i in range(len(stamps) - 1))
+    return gaps[len(gaps) // 2]
+
+
+# Retrying a page that keeps failing costs a request every sync, for a page
+# that has never once worked. mrmoneymustache.com holds twelve of them --
+# announcements from 2011 to 2019 that no longer resolve -- and at three
+# seconds a page they were most of the cost of every update.
+#
+# So a failing page is left alone for a while, and the while grows with how
+# long it has been failing: something that broke yesterday is worth another
+# try tomorrow, something that has been broken for a year is not. No attempt
+# counter is needed for that -- the span between when the article was found
+# and when it was last tried says the same thing.
+RETRY_BACKOFF = 0.5
+MIN_RETRY = timedelta(days=1)
+MAX_RETRY = timedelta(days=30)
+
+
+def _cooling(row, now: datetime | None = None) -> bool:
+    """Whether a failed article is still inside its back-off window."""
+    last = _parse(row["content_fetched_at"])
+    if last is None:
+        return False                       # never actually tried; try now
+    found = _parse(row["discovered_at"]) or last
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    wait = max(MIN_RETRY, min(MAX_RETRY, (last - found) * RETRY_BACKOFF))
+    return now - last < wait
+
+
+def due_sources(conn, now: datetime | None = None) -> list[int]:
+    """The blogs worth asking right now, judged by their own publishing rhythm.
+
+    Checking all of them on every launch is what makes an automatic update
+    expensive: seven blogs, most of which publish monthly, all questioned
+    because one of them publishes daily. Chronicle holds each blog's entire
+    history, so it can tell them apart -- a blog is asked again after a
+    quarter of its own typical gap between posts, bounded either side.
+
+    A blog that has gone quiet counts as slow rather than as due: the interval
+    is measured against the longer of its usual gap and its actual silence, so
+    a site that stopped publishing in 2019 is not questioned every hour on the
+    grounds that it once posted weekly.
+
+    Nothing goes unasked for more than MAX_CHECK, and pressing the button
+    still asks everything -- this only decides what is worth doing unprompted.
+    """
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    due: list[int] = []
+    for row in db.list_sources(conn, enabled_only=True):
+        last = _parse(row["last_sync_at"])
+        if last is None:
+            due.append(row["id"])          # never synced: nothing to go on
+            continue
+        cadence = _cadence(conn, row["id"])
+        if cadence is None:
+            interval = MIN_CHECK           # too little history to judge
+        else:
+            newest = _parse(conn.execute(
+                "SELECT MAX(published_at) m FROM articles WHERE source_id=?",
+                (row["id"],)).fetchone()["m"])
+            silence = (now - newest) if newest else cadence
+            interval = max(cadence, silence) * CHECK_FRACTION
+            interval = max(MIN_CHECK, min(MAX_CHECK, interval))
+        if now - last >= interval:
+            due.append(row["id"])
+    return due
 
 
 @dataclass
@@ -144,17 +248,21 @@ class Syncer:
 
         # What this source already has, so discovery can skip what is settled
         # instead of paying one request per already-archived article.
-        def _state(status: str) -> str:
-            if status in ("ok", "partial", "paywalled"):
+        def _state(r) -> str:
+            if r["content_status"] in ("ok", "partial", "paywalled"):
                 return "ok"
-            return "gone" if status == "gone" else "missing"
+            if r["content_status"] == "gone":
+                return "gone"
+            if r["content_status"] == "error" and _cooling(r):
+                return "cooling"
+            return "missing"
 
         known = {
-            r["guid"]: (r["published_at"] is not None,
-                        _state(r["content_status"]),
+            r["guid"]: (r["published_at"] is not None, _state(r),
                         db._date_rank(r["date_confidence"]))
             for r in conn.execute(
-                "SELECT guid, published_at, content_status, date_confidence "
+                "SELECT guid, published_at, content_status, date_confidence, "
+                "content_fetched_at, discovered_at "
                 "FROM articles WHERE source_id=?", (row["id"],))
         }
 
@@ -166,6 +274,12 @@ class Syncer:
             "SELECT MAX(published_at) m FROM articles WHERE source_id=?",
             (row["id"],)).fetchone()["m"]
         incremental = bool(newest_only and newest_known)
+
+        # A blog with nothing archived yet is a first build: several hundred
+        # pages of one site, where the polite spacing between requests *is*
+        # the cost. Halve it for that one job. Routine updates fetch a handful
+        # of pages and can afford to be gentler, so they go back to full.
+        net.set_rate_scale(FIRST_BUILD_RATE_SCALE if not known else 1.0)
 
         new_rejects: list[str] = []
         ctx = Context(
@@ -244,6 +358,7 @@ class Syncer:
                         pending.append((r["id"], r["url"], None, None, {}))
             self._fetch_bodies(conn, source, ctx, row, pending, prog, cache_images)
 
+        net.set_rate_scale(1.0)
         status = "stopped" if self.should_stop() else "ok"
         note = f" — {ctx.result_note}" if ctx.result_note else ""
         kind = "new posts" if incremental else "full scan"

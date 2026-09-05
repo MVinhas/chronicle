@@ -99,6 +99,17 @@
   </recommends>
 
   <releases>
+    <release version="1.9.0" date="2026-09-05">
+      <description>
+        <ul>
+          <li>Chronicle now catches up by itself. A few seconds after you open it, once the window is up, it quietly looks for new posts and tells you only if it found any — it will not take you to another page or move the article you were reading.</li>
+          <li>It does not ask every blog every time. Chronicle knows how often each blog actually publishes, because it holds the whole history, so it asks a daily blog several times a day and a monthly one every few days. On a typical launch that is one blog rather than all of them, and nothing goes unasked for more than three days. Pressing the button still asks everything.</li>
+          <li>A page that fails to load is no longer retried on every single update. Twelve old Mr. Money Mustache announcements no longer resolve, and re-fetching all twelve was most of the cost of updating that blog; a failing page now waits, and waits longer the longer it has been failing.</li>
+          <li>Two kinds of link are no longer chased forever: a "random post" redirect, which answers with a different article every time and so could never be recognised as one already held, and a link with a stray space in it, which is a second address for a page already listed. Together they were a third of the requests made to Mr. Money Mustache.</li>
+          <li>Building a blog's archive for the first time now runs at twice the request rate — that is the one job where the polite pause between requests is the whole cost. Routine updates stay gentle.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.8.0" date="2026-09-05">
       <description>
         <ul>
