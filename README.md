@@ -156,10 +156,13 @@ guess, which blogs are earning their place in the queue.
 
 Two different jobs, so two buttons:
 
-- **Fetch new posts** — what each blog has published since the last update. It
-  reads the routes that list newest-first and stops as soon as it reaches what
-  you already have, so it's a matter of seconds. This is `F5`, and what you
-  want almost every time.
+- **Fetch new posts** — what each blog has published since the last update, in
+  seconds. How that is done depends on what the site offers: an API is simply
+  asked for posts published since your newest one; a feed or archive index is
+  read newest-first and abandoned as soon as it reaches what you already have;
+  and a site with neither — gwern.net has no feed, and its sitemap carries no
+  dates at all — is enumerated by which of its pages you do not yet hold. This
+  is `F5`, and what you want almost every time.
 - **Full archive scan** — re-examines each blog's whole history. Slow. Use it
   after adding a blog, or to fill in gaps.
 

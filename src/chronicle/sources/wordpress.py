@@ -31,12 +31,18 @@ class WordPressSource(Source):
         return self.config.get("api_root") or f"{self.homepage.rstrip('/')}/wp-json/wp/v2"
 
     def discover(self, ctx: Context):
-        ctx.say(f"Querying {self.name} REST API…")
+        # The REST API can do the filtering itself: `after` is the whole of
+        # "fetch new posts" in one parameter, so a routine update reads one
+        # page of nothing instead of paginating the entire history.
+        since = ctx.since()
+        window = f"&after={since}" if since else ""
+        ctx.say(f"Querying {self.name} REST API"
+                f"{' for posts since ' + since[:10] if since else ''}…")
         page, order, total = 1, 0, None
         while True:
             ctx.check()
             url = (f"{self.api_root}/posts?per_page={PAGE_SIZE}&page={page}"
-                   f"&orderby=date&order=asc&_fields={FIELDS}")
+                   f"&orderby=date&order=asc&_fields={FIELDS}{window}")
             try:
                 resp = net.fetch(url, headers={"Accept": "application/json"})
                 posts = json.loads(resp.text())
@@ -48,7 +54,8 @@ class WordPressSource(Source):
                 break
             if total is None:
                 total = int(resp.headers.get("x-wp-total", 0)) or None
-                ctx.say(f"{self.name}: {total or 'unknown'} posts to import")
+                ctx.say(f"{self.name}: {total or 'unknown'} posts to "
+                        f"{'check' if since else 'import'}")
 
             for post in posts:
                 if post.get("status") not in (None, "publish"):

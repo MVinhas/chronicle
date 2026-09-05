@@ -12,6 +12,7 @@ with a truncated body; we store what is public and mark the article
 from __future__ import annotations
 
 import json
+import urllib.parse
 import re
 
 from .. import dates, htmlutil, net
@@ -49,13 +50,18 @@ class GhostSource(Source):
             return
 
         base = self.homepage.rstrip("/")
+        # Ghost filters server-side too, so a routine update asks only for what
+        # was published after what we hold rather than paging the archive.
+        since = ctx.since()
+        window = (f"&filter={urllib.parse.quote(f'published_at:>{since}')}"
+                  if since else "")
         page, order, total = 1, 0, None
         while True:
             ctx.check()
             url = (f"{base}/ghost/api/content/posts/?key={key}&limit={PAGE_SIZE}"
                    f"&page={page}&order=published_at%20asc"
                    f"&fields=id,title,url,published_at,updated_at,excerpt,visibility,slug"
-                   f"&formats=html")
+                   f"&formats=html{window}")
             try:
                 data = net.fetch_json(url)
             except (net.FetchError, json.JSONDecodeError):

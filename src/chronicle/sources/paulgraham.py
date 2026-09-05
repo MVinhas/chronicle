@@ -67,11 +67,19 @@ class PaulGrahamSource(Source):
             if s in DENY or s in slugs:
                 continue
             slugs.append(s)
-        ctx.say(f"Found {len(slugs)} essays on paulgraham.com")
+        # The dateline lives in the essay's own body, so there is nothing to
+        # enumerate by but the essays themselves -- 229 requests, minutes of
+        # them. An essay already archived with its body has nothing further to
+        # give, so only the ones never resolved are read.
+        todo = [(i, slug) for i, slug in enumerate(slugs)
+                if not ctx.no_direct(net.canonical_url(BASE + slug))]
+        complete = len(todo) == len(slugs)
+        ctx.say(f"paulgraham.com: {len(slugs)} essays listed, "
+                f"{len(todo)} to read")
+        ctx.result_note = f"index {len(slugs)}, read {len(todo)}"
 
-        # Every essay has to be fetched to read its dateline, and the index
-        # order matters for bracketing the undated ones, so collect in order
-        # and only then yield.
+        # The index order matters for bracketing the undated essays, so
+        # collect in order and only then yield.
         def read(item):
             i, slug = item
             url = BASE + slug
@@ -85,12 +93,19 @@ class PaulGrahamSource(Source):
                         date=date, author="Paul Graham", source_order=i,
                         raw_html=raw, base_url=resp.url, content_source="direct")
 
-        found = [s for s in probe_all(ctx, list(enumerate(slugs)), read,
+        found = [s for s in probe_all(ctx, todo, read,
                                       workers=self.discover_concurrency,
                                       label="paulgraham.com: reading")
                  if s is not None]
 
-        self._bracket_undated(found)
+        # Bracketing reads an undated essay's date off its neighbours in the
+        # index, so it is only meaningful when every neighbour is present. On
+        # a partial pass the essays either side may simply not have been read,
+        # and a window measured against the wrong pair would invent a date --
+        # exactly what this source exists to avoid. Undated is the honest
+        # answer until the next full scan.
+        if complete:
+            self._bracket_undated(found)
         yield from found
 
     # -- metadata ----------------------------------------------------------

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Callable, Iterable, Iterator
 
 from .. import dates, htmlutil, net
@@ -75,6 +76,28 @@ class Context:
     # a candidate older than this is already accounted for, so enumeration can
     # stop rather than walk back through the whole history.
     newest_known: str | None = None
+
+    # How far back a server-side "published after" filter reaches beyond the
+    # newest article already held. WordPress compares `after` against the
+    # site's *local* publication time while newest_known is UTC, so a cutoff
+    # set exactly at the boundary can miss a post by the site's whole UTC
+    # offset. Two days covers every offset in use and any plausible clock
+    # skew, and costs only a few already-seen posts in the response.
+    SINCE_MARGIN_DAYS = 2
+
+    def since(self) -> str | None:
+        """Cutoff for a server-side "published after" query, or None for all.
+
+        None means ask for the whole history: either this is a full scan, or
+        nothing is archived yet and there is no "since" to speak of.
+        """
+        if not self.newest_only or not self.newest_known:
+            return None
+        try:
+            newest = datetime.fromisoformat(self.newest_known)
+        except ValueError:
+            return None
+        return (newest - timedelta(days=self.SINCE_MARGIN_DAYS)).isoformat()
 
     def check(self) -> None:
         if self.should_stop():

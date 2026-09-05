@@ -7,9 +7,11 @@ rather than the behaviour of one real website.
 """
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
+import urllib.parse
 from unittest import mock
 
 from chronicle import db, net, sync
@@ -17,10 +19,11 @@ from chronicle.sources import detect, discovery
 from chronicle.sources.generic import GenericSource
 from chronicle.sources.base import Context
 
-from fakesite import (FakeNet, listing_html, post_html, rss_xml,
+from fakesite import (PARA, FakeNet, listing_html, post_html, rss_xml,
                       sitemap_index_xml, sitemap_xml)
 
 BASE = "https://blog.example"
+WPBASE = "https://wp.example"
 
 _REAL_CONNECT = db.connect
 
@@ -747,3 +750,215 @@ class TestFetchNewPosts(SyncHarness):
         msg = c.execute("SELECT last_sync_message m FROM sources").fetchone()["m"]
         c.close()
         self.assertTrue(msg.startswith("new posts:"), msg)
+
+
+# --------------------------------------------------------------------------
+# Routine updates
+#
+# "Fetch new posts" has to cost about nothing on a built archive. Every source
+# below used to re-derive its whole history on every run: gwern.net fetched all
+# 669 candidate pages to read one meta tag from each, paulgraham.com re-read all
+# 229 essays for their datelines, and the WordPress adapter paginated the entire
+# archive from page one. These prove each of them now enumerates only what it
+# does not already have.
+# --------------------------------------------------------------------------
+
+GWERN = {"name": "Gwern", "plugin": "gwern", "homepage": "https://gwern.net",
+         "config": {}}
+PG = {"name": "Paul Graham", "plugin": "paulgraham",
+      "homepage": "https://paulgraham.com/", "config": {}}
+
+
+def gwern_page(title, issued):
+    """A gwern.net essay: the date lives in a Dublin Core meta tag."""
+    meta = f'<meta name="dc.date.issued" content="{issued}">' if issued else ""
+    return ("<html><head><title>%s</title>%s</head><body>"
+            "<div id=\"markdownBody\"><p>%s</p></div></body></html>"
+            % (title, meta, PARA * 3))
+
+
+class TestGwernUpdates(SyncHarness):
+    """gwern.net has no feed and its sitemap carries no <lastmod>, so there is
+    no date to enumerate by -- only identity."""
+
+    def _site(self):
+        fn = FakeNet()
+        urls = []
+        for i in range(6):
+            u = f"https://gwern.net/essay-{i}"
+            fn.add(u, gwern_page(f"Essay {i}", f"201{i}-03-04"))
+            urls.append(u)
+        # Site furniture: fetched once, has no date, must never be fetched again.
+        fn.add("https://gwern.net/about", gwern_page("About", None))
+        urls.append("https://gwern.net/about")
+        fn.add("https://gwern.net/sitemap.xml", sitemap_xml(urls))
+        fn.add("https://gwern.net/index", "<html><title>Index</title></html>")
+        return fn, urls
+
+    def test_a_built_archive_is_not_re_probed(self):
+        fn, _ = self._site()
+        run_sync(fn, self.dbfile, spec=GWERN)
+        self.assertEqual(len(self.urls()), 6)
+
+        fn.requests.clear()
+        run_sync(fn, self.dbfile, spec=GWERN, newest_only=True)
+        # The sitemap and index still get read; nothing else does.
+        self.assertEqual(fn.count("/essay-"), 0)
+        self.assertEqual(fn.count("/about"), 0)
+
+    def test_an_undated_page_is_judged_once(self):
+        """Without a recorded verdict, every sync pays a request to rediscover
+        that /about is not an article."""
+        fn, _ = self._site()
+        run_sync(fn, self.dbfile, spec=GWERN)
+        fn.requests.clear()
+        run_sync(fn, self.dbfile, spec=GWERN)      # a *full* scan, even
+        self.assertEqual(fn.count("/about"), 0)
+
+    def test_a_new_essay_is_still_found(self):
+        fn, urls = self._site()
+        run_sync(fn, self.dbfile, spec=GWERN)
+
+        fn.add("https://gwern.net/brand-new", gwern_page("Brand New", "2026-05-05"))
+        fn.add("https://gwern.net/sitemap.xml",
+               sitemap_xml(urls + ["https://gwern.net/brand-new"]))
+        fn.requests.clear()
+        prog = run_sync(fn, self.dbfile, spec=GWERN, newest_only=True)
+
+        self.assertEqual(prog.new, 1)
+        self.assertEqual(len(self.urls()), 7)
+        # Exactly one essay was read: the new one.
+        self.assertEqual(fn.count("/brand-new"), 1)
+        self.assertEqual(fn.count("/essay-"), 0)
+
+
+class TestPaulGrahamUpdates(SyncHarness):
+    def _site(self, n=5):
+        fn = FakeNet()
+        slugs = [f"essay{i}.html" for i in range(n)]
+        links = "".join(f'<a href="{s}">E</a>' for s in slugs)
+        fn.add("https://paulgraham.com/articles.html",
+               f"<html><body>{links}</body></html>")
+        for i, s in enumerate(slugs):
+            fn.add(f"https://paulgraham.com/{s}",
+                   f"<html><head><title>Essay {i}</title></head><body>"
+                   f"<font face=\"verdana\">March 200{i}<br><br>{PARA * 3}"
+                   f"</font></body></html>")
+        return fn, slugs
+
+    def test_essays_are_read_once(self):
+        fn, _ = self._site()
+        run_sync(fn, self.dbfile, spec=PG)
+        self.assertEqual(len(self.urls()), 5)
+
+        fn.requests.clear()
+        run_sync(fn, self.dbfile, spec=PG, newest_only=True)
+        # The index is still read; not one essay behind it is.
+        self.assertEqual(fn.count("articles.html"), 1)
+        self.assertEqual(fn.count("essay"), 0)
+
+    def test_a_new_essay_is_still_read(self):
+        fn, slugs = self._site()
+        run_sync(fn, self.dbfile, spec=PG)
+
+        links = "".join(f'<a href="{s}">E</a>' for s in slugs + ["fresh.html"])
+        fn.add("https://paulgraham.com/articles.html",
+               f"<html><body>{links}</body></html>")
+        fn.add("https://paulgraham.com/fresh.html",
+               "<html><head><title>Fresh</title></head><body>"
+               f"<font face=\"verdana\">June 2026<br><br>{PARA * 3}</font>"
+               "</body></html>")
+        fn.requests.clear()
+        prog = run_sync(fn, self.dbfile, spec=PG, newest_only=True)
+        self.assertEqual(prog.new, 1)
+        self.assertEqual(fn.count("fresh.html"), 1)
+        self.assertEqual(fn.count("essay0.html"), 0)
+
+
+WP = {"name": "WP Blog", "plugin": "wordpress", "homepage": WPBASE,
+      "config": {"api_root": WPBASE + "/wp-json/wp/v2"}}
+
+
+class FakeWordPress(FakeNet):
+    """A REST origin that honours per_page/page/after.
+
+    Answering the query rather than a canned URL is the point: it proves the
+    adapter narrowed what it asked for, not merely that some string appeared
+    in a URL.
+    """
+
+    def __init__(self, posts):
+        super().__init__()
+        self.posts = posts                    # [(iso_date, slug, title)]
+
+    def fetch(self, url, **kw):
+        if "/wp-json/" not in url:
+            return super().fetch(url, **kw)
+        self.requests.append(url)
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        after = (q.get("after") or [None])[0]
+        per_page = int((q.get("per_page") or ["10"])[0])
+        page = int((q.get("page") or ["1"])[0])
+
+        chosen = sorted(p for p in self.posts if after is None or p[0] > after)
+        window = chosen[(page - 1) * per_page: page * per_page]
+        body = json.dumps([
+            {"id": i, "date_gmt": d, "modified_gmt": d, "link": f"{WPBASE}/{slug}/",
+             "title": {"rendered": title},
+             "content": {"rendered": "<p>" + PARA * 3 + "</p>"},
+             "excerpt": {"rendered": "<p>short</p>"}, "slug": slug,
+             "status": "publish", "type": "post"}
+            for i, (d, slug, title) in enumerate(window)])
+        return net.Response(url=url, status=200,
+                            headers={"x-wp-total": str(len(chosen)),
+                                     "content-type": "application/json"},
+                            body=body.encode())
+
+
+class TestWordPressUpdates(SyncHarness):
+    """The REST API can filter by date, so a routine update is one request."""
+
+    def _posts(self, n=8):
+        # Real past dates: dates.parse_iso refuses a future one, and a fixture
+        # of undated posts would prove nothing about a date filter.
+        return [(f"20{10 + i:02d}-03-04T10:00:00", f"post-{i}", f"Post {i}")
+                for i in range(n)]
+
+    def test_the_whole_archive_is_imported_first(self):
+        fn = FakeWordPress(self._posts())
+        prog = run_sync(fn, self.dbfile, spec=WP)
+        self.assertEqual(len(self.urls()), 8)
+        self.assertEqual(prog.new, 8)
+        # No date filter on a full scan: it must see everything.
+        self.assertEqual(fn.count("after="), 0)
+
+    def test_a_routine_update_asks_only_for_what_is_new(self):
+        posts = self._posts()
+        fn = FakeWordPress(posts)
+        run_sync(fn, self.dbfile, spec=WP)
+
+        fn.posts = posts + [("2026-01-01T00:00:00", "fresh", "Fresh")]
+        fn.requests.clear()
+        prog = run_sync(fn, self.dbfile, spec=WP, newest_only=True)
+
+        self.assertEqual(prog.new, 1)
+        self.assertEqual(len(self.urls()), 9)
+        # One API request, carrying the cutoff -- not a walk through 8 pages.
+        api = [u for u in fn.requests if "/wp-json/" in u]
+        self.assertEqual(len(api), 1)
+        self.assertIn("after=", api[0])
+
+    def test_the_cutoff_reaches_back_far_enough_to_be_safe(self):
+        """WordPress compares `after` against the site's local publication
+        time, while the cutoff is UTC. A filter set exactly at the newest
+        article held would lose a post to the site's own UTC offset."""
+        posts = self._posts()
+        fn = FakeWordPress(posts)
+        run_sync(fn, self.dbfile, spec=WP)
+
+        newest = max(p[0] for p in posts)
+        run_sync(fn, self.dbfile, spec=WP, newest_only=True)
+        api = [u for u in fn.requests if "after=" in u][-1]
+        cutoff = urllib.parse.parse_qs(urllib.parse.urlparse(api).query)["after"][0]
+        self.assertLess(cutoff, newest)
+        self.assertGreater(cutoff, "2017-02")  # near the end, not the start

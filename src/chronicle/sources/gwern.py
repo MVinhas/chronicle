@@ -41,15 +41,42 @@ class GwernSource(Source):
     def discover(self, ctx: Context):
         ctx.say("Reading gwern.net sitemap…")
         urls = self._candidate_urls(ctx)
-        ctx.say(f"Found {len(urls)} candidate pages on gwern.net")
-
         ordered = sorted(urls)
-        for stub in probe_all(ctx, list(enumerate(ordered)),
-                              lambda item: self._probe(item[1], item[0]),
+
+        # gwern.net has no feed and its sitemap carries no <lastmod>, so there
+        # is no date to enumerate by: the only way to learn when a page was
+        # published is to fetch the page and read its dc.date.issued. That is
+        # 669 requests, and at the polite rate this costs about seven minutes
+        # -- every sync, including "fetch new posts".
+        #
+        # So the enumeration is by identity instead of by date. A page already
+        # archived with its content, or already judged not to be an article,
+        # can tell us nothing we do not have; what is left is what the site
+        # has published since. On a built archive that is a handful of pages,
+        # and the sync takes seconds.
+        todo = [(i, url) for i, url in enumerate(ordered)
+                if not self._resolved(ctx, url)]
+        ctx.say(f"gwern.net: {len(ordered)} candidate pages, "
+                f"{len(todo)} not yet resolved")
+        ctx.result_note = f"sitemap {len(ordered)}, examined {len(todo)}"
+
+        for stub in probe_all(ctx, todo,
+                              lambda item: self._probe(ctx, item[1], item[0]),
                               workers=self.discover_concurrency,
                               label="gwern.net: reading metadata"):
             if stub is not None:
                 yield stub
+
+    @staticmethod
+    def _resolved(ctx: Context, url: str) -> bool:
+        """Whether an earlier sync already settled what this page is.
+
+        Either it is archived with a date and a body, or it was fetched and
+        found not to be an article at all. Both verdicts survive in the
+        library, and re-deriving either costs a request.
+        """
+        guid = net.canonical_url(url)
+        return ctx.no_direct(guid) or bool(ctx.rejected and guid in ctx.rejected)
 
     # -- discovery helpers -------------------------------------------------
 
@@ -95,7 +122,7 @@ class GwernSource(Source):
             return False
         return True
 
-    def _probe(self, url: str, order: int) -> Stub | None:
+    def _probe(self, ctx: Context, url: str, order: int) -> Stub | None:
         """Fetch a page just far enough to read its metadata."""
         try:
             resp = net.fetch(url)
@@ -121,6 +148,10 @@ class GwernSource(Source):
             date = dates.UNKNOWN
 
         if not date.known:
+            # Recorded, not just skipped: a page with no dc.date.issued is
+            # site furniture or an index, and without the verdict every sync
+            # from here on pays a request to reach the same conclusion.
+            ctx.reject(net.canonical_url(url))
             return None  # without a date it cannot join the chronology
 
         title = htmlutil.clean_title(htmlutil.page_title(soup), "Gwern.net", "Gwern")

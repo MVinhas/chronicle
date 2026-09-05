@@ -99,6 +99,16 @@
   </recommends>
 
   <releases>
+    <release version="1.8.0" date="2026-09-05">
+      <description>
+        <ul>
+          <li>Fetch new posts is now a matter of seconds rather than minutes. It was quietly re-deriving each blog's entire history every time: gwern.net was fetching all 669 of its pages to read one date out of each, paulgraham.com was re-reading all 229 essays for their datelines, and WordPress blogs were paged through from the very first post. Gwern alone took eight minutes. It now takes two seconds.</li>
+          <li>Each blog is asked the cheapest question its site can answer. A WordPress or Ghost blog is asked outright for posts published since your newest one. A site with a feed or an archive index is read newest-first and abandoned as soon as it reaches what you already have. A site with neither — gwern.net has no feed and its sitemap carries no dates — is enumerated by which pages you do not yet hold.</li>
+          <li>Pages that turn out not to be articles are now remembered as such, so they are examined once rather than on every update.</li>
+          <li>A full archive scan is unchanged in what it finds, and is still there for filling gaps.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.7.4" date="2026-09-05">
       <description>
         <ul>
