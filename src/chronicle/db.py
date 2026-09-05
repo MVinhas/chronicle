@@ -7,15 +7,18 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
 from typing import Any, Iterable, Sequence
 
-from . import paths
+from . import net, paths
 
-SCHEMA_VERSION = 4
+log = logging.getLogger("chronicle.db")
+
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -273,6 +276,12 @@ def init(conn: sqlite3.Connection) -> None:
         conn.execute("INSERT INTO meta(key,value) VALUES('schema_version',?)",
                      (str(SCHEMA_VERSION),))
     else:
+        try:
+            was = int(row["value"])
+        except (TypeError, ValueError):
+            was = 0
+        if was < 5:
+            _repair_c1(conn)
         conn.execute("UPDATE meta SET value=? WHERE key='schema_version'",
                      (str(SCHEMA_VERSION),))
 
@@ -295,6 +304,38 @@ def _migrate(conn: sqlite3.Connection) -> None:
         # in place. Nothing to migrate.
         if cols and column not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
+def _repair_c1(conn: sqlite3.Connection) -> None:
+    """One-off: heal text an older Chronicle decoded as ISO-8859-1.
+
+    Before schema 5 a page that declared no charset -- paulgraham.com being the
+    one that matters -- fell through to a latin-1 decode, which turned every
+    windows-1252 em dash into U+0097, a control character that renders as
+    nothing at all. The mapping back is exact, so the archive is repaired in
+    place rather than re-fetched.
+    """
+    fields = ("title", "excerpt", "content_html")
+    columns = ", ".join(fields)
+
+    # Two passes, so a whole archive's worth of article bodies is never held in
+    # memory at once: the scan streams and keeps only the ids, and the repair
+    # reads back one article at a time.
+    scan = conn.execute(f"SELECT id, {columns} FROM articles")
+    todo = [row["id"] for row in scan
+            if any(row[f] != net.repair_c1(row[f]) for f in fields if row[f])]
+
+    for article_id in todo:
+        row = conn.execute(f"SELECT {columns} FROM articles WHERE id=?",
+                           (article_id,)).fetchone()
+        updates = {f: net.repair_c1(row[f]) for f in fields
+                   if row[f] and row[f] != net.repair_c1(row[f])}
+        conn.execute(
+            "UPDATE articles SET %s WHERE id=?"
+            % ", ".join(f"{f}=?" for f in updates),
+            (*updates.values(), article_id))
+    if todo:
+        log.info("repaired mis-decoded text in %d articles", len(todo))
 
 
 # --------------------------------------------------------------------------

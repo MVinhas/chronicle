@@ -5,11 +5,13 @@ hammering anyone's server — a full first run touches ~2,000 pages.
 """
 from __future__ import annotations
 
+import codecs
 import gzip
 import hashlib
 import json
 import logging
 import random
+import re
 import threading
 import time
 import urllib.error
@@ -34,6 +36,141 @@ DEFAULT_HEADERS = {
 }
 
 
+# --------------------------------------------------------------------------
+# Bytes to text
+#
+# Getting this wrong is invisible and permanent: it corrupts what gets archived,
+# not just what gets shown. The specific failure that motivates the care here is
+# paulgraham.com, which serves "Content-Type: text/html" with no charset at all
+# and windows-1252 bytes. Decoded as ISO-8859-1 -- the obvious fallback, and the
+# one a strict reading of the RFCs asks for -- byte 0x97 becomes U+0097, a C1
+# control character that renders as *nothing*. Every em dash in the essay
+# silently disappears.
+#
+# So we do what browsers do instead of what the RFCs say, per the WHATWG
+# Encoding Standard.
+# --------------------------------------------------------------------------
+
+# Labels that must not be honoured literally. ISO-8859-1 is the one that
+# matters: the bytes publishers actually send in 0x80-0x9F are curly quotes,
+# dashes and ellipses, never control codes, so every browser decodes a page
+# that declares latin-1 as windows-1252. The rest of the table follows the
+# same standard's index, covering the other labels seen in the wild.
+_LABEL_ALIASES = {
+    "ascii": "windows-1252", "us-ascii": "windows-1252",
+    "iso-8859-1": "windows-1252", "iso8859-1": "windows-1252",
+    "iso_8859-1": "windows-1252", "iso88591": "windows-1252",
+    "latin1": "windows-1252", "latin-1": "windows-1252",
+    "l1": "windows-1252", "cp819": "windows-1252", "cp1252": "windows-1252",
+    "iso-8859-9": "windows-1254", "iso8859-9": "windows-1254",
+    "latin5": "windows-1254",
+    "iso-8859-11": "windows-874", "tis-620": "windows-874",
+    "gb2312": "gbk", "gb_2312": "gbk", "euc-cn": "gbk", "chinese": "gbk",
+    "ks_c_5601-1987": "euc-kr", "korean": "euc-kr",
+    "shift-jis": "shift_jis", "sjis": "shift_jis", "x-sjis": "shift_jis",
+    "utf8": "utf-8", "unicode-1-1-utf-8": "utf-8",
+}
+
+# The printable characters windows-1252 puts where ISO-8859-1 has C1 controls.
+# Text that reaches us already decoded the wrong way -- by an older Chronicle,
+# or by the publisher's own toolchain -- is repaired with this, because a C1
+# control in prose is never anything but a mis-decoded dash or quote.
+_C1_REPAIR = {}
+for _b in range(0x80, 0xA0):
+    try:
+        _C1_REPAIR[_b] = ord(bytes([_b]).decode("cp1252"))
+    except UnicodeDecodeError:
+        pass                      # 0x81, 0x8D, 0x8F, 0x90, 0x9D: undefined
+del _b
+
+_META_CHARSET_RE = re.compile(
+    rb"""<meta[^>]+?charset\s*=\s*["']?\s*([A-Za-z0-9_:.+-]+)""", re.I)
+
+# BOM sniffing, which outranks every declaration. Only UTF-8 and UTF-16 are
+# sniffed -- that is all the HTML standard sniffs, and UTF-32 does not exist
+# on the web.
+_BOMS = ((codecs.BOM_UTF8, "utf-8-sig"),
+         (codecs.BOM_UTF16_LE, "utf-16"),
+         (codecs.BOM_UTF16_BE, "utf-16"))
+
+
+def repair_c1(text: str) -> str:
+    """Turn stray C1 control characters back into the punctuation they were."""
+    return text.translate(_C1_REPAIR) if text else text
+
+
+def _codec(label: str | None) -> str | None:
+    """Normalise a charset label, or None if Python cannot decode it."""
+    key = (label or "").strip().strip('"\'').lower()
+    key = _LABEL_ALIASES.get(key, key)
+    if not key:
+        return None
+    try:
+        codecs.lookup(key)
+    except LookupError:
+        return None
+    return key
+
+
+def _declared_charset(ctype: str, body: bytes) -> str | None:
+    """The encoding the page claims, from the HTTP header or its own <meta>."""
+    if "charset=" in ctype.lower():
+        enc = _codec(ctype.lower().split("charset=")[-1].split(";")[0])
+        if enc:
+            return enc
+    m = _META_CHARSET_RE.search(body[:4096])
+    if m:
+        return _codec(m.group(1).decode("ascii", "replace"))
+    return None
+
+
+def _is_utf8(body: bytes) -> bool:
+    """Whether the body is UTF-8, tolerating a truncated final sequence.
+
+    _decompress hands back partial bodies on purpose, and a body cut mid
+    sequence is still a UTF-8 body -- rejecting it here would send the whole
+    page down the single-byte path and mojibake all of it. An incremental
+    decoder draws that line exactly: with final=False it holds back an
+    incomplete trailing sequence and raises only on bytes that could not begin
+    one, so a lone 0x97 at the end is still rejected.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    try:
+        decoder.decode(body, False)
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def decode_body(body: bytes, ctype: str = "", fallback: str = "utf-8") -> str:
+    """Decode a response body the way a browser would."""
+    for bom, enc in _BOMS:
+        if body.startswith(bom):
+            return repair_c1(body.decode(enc, "replace"))
+
+    declared = _declared_charset(ctype, body)
+    wide = bool(declared) and declared.startswith(("utf-16", "utf-32"))
+
+    # A declared single-byte encoding is not evidence of anything: those codecs
+    # accept any byte sequence at all, so honouring one over a body that is
+    # plainly UTF-8 is how a page that mislabels itself latin-1 turns every em
+    # dash into "â€”". Valid UTF-8 wins. (Not for UTF-16, whose ASCII text
+    # is full of NULs and so passes a UTF-8 check while meaning nothing.)
+    if not wide and _is_utf8(body):
+        return repair_c1(body.decode("utf-8", "replace"))
+
+    for candidate in (declared, fallback, "utf-8", "windows-1252"):
+        if not candidate:
+            continue
+        try:
+            return repair_c1(body.decode(candidate, "strict"))
+        except (LookupError, UnicodeDecodeError):
+            continue
+    # windows-1252, not latin-1: its five undefined bytes become a visible
+    # replacement character rather than an invisible control.
+    return repair_c1(body.decode("windows-1252", "replace"))
+
+
 class FetchError(Exception):
     def __init__(self, url: str, status: int | None, message: str):
         super().__init__(f"{status or 'ERR'} {url}: {message}")
@@ -49,24 +186,8 @@ class Response:
     from_cache: bool = False
 
     def text(self, fallback: str = "utf-8") -> str:
-        ctype = self.headers.get("content-type", "")
-        enc = None
-        if "charset=" in ctype:
-            enc = ctype.split("charset=")[-1].split(";")[0].strip().strip('"')
-        if not enc:
-            head = self.body[:4096].decode("ascii", "replace").lower()
-            if 'charset="' in head:
-                enc = head.split('charset="')[1].split('"')[0]
-            elif "charset=" in head:
-                enc = head.split("charset=")[1].split('"')[0].split("'")[0].split(">")[0].strip()
-        for candidate in (enc, fallback, "utf-8", "latin-1"):
-            if not candidate:
-                continue
-            try:
-                return self.body.decode(candidate, "strict")
-            except (LookupError, UnicodeDecodeError):
-                continue
-        return self.body.decode("utf-8", "replace")
+        return decode_body(self.body, self.headers.get("content-type", ""),
+                           fallback)
 
     def json(self):
         return json.loads(self.text())

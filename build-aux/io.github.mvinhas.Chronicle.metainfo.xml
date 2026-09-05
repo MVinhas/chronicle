@@ -99,6 +99,15 @@
   </recommends>
 
   <releases>
+    <release version="1.7.2" date="2026-09-05">
+      <description>
+        <ul>
+          <li>Em dashes are back. A site that serves Western European text without saying which encoding it used — paulgraham.com does exactly this — was being read as ISO-8859-1, which turns an em dash into a control character that renders as nothing at all. Fifteen essays had every dash silently missing from them.</li>
+          <li>Chronicle now works out an encoding the way a browser does: a byte-order mark outranks everything, a page that declares Latin-1 is read as Windows-1252, and text that is plainly UTF-8 is read as UTF-8 whatever the page claims — which is what stops a mislabelled page turning its dashes and apostrophes into â€” and â€™. Emoji, accents and non-Latin scripts all come through intact.</li>
+          <li>Articles already in your library are repaired in place when you open it, so the dashes come back without re-fetching anything.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.7.1" date="2026-09-05">
       <description>
         <ul>

@@ -602,6 +602,108 @@ class TestMigration(unittest.TestCase):
         conn.close()
 
 
+    def test_mis_decoded_text_is_repaired_on_open(self):
+        """A library built before schema 5 has em dashes stored as U+0097."""
+        from chronicle import db
+        conn = db.connect(self.tmp.name)
+        db.init(conn)
+        conn.execute("INSERT INTO sources(slug,name,plugin,added_at) "
+                     "VALUES('s','S','generic','2020-01-01T00:00:00')")
+        conn.execute(
+            "INSERT INTO articles(id,source_id,guid,url,discovered_at,"
+            "title,excerpt,content_html) "
+            "VALUES(1,1,'g','https://e.com/a','2020-01-01T00:00:00',?,?,?)",
+            ("A \u0097 B", "x \u0092s", "<p>machines \u0097 CPU</p>"))
+        conn.execute("UPDATE meta SET value='4' WHERE key='schema_version'")
+        conn.commit()
+        conn.close()
+
+        conn = db.connect(self.tmp.name)
+        db.init(conn)
+        row = conn.execute("SELECT * FROM articles WHERE id=1").fetchone()
+        self.assertEqual(row["title"], "A \u2014 B")
+        self.assertEqual(row["excerpt"], "x \u2019s")
+        self.assertEqual(row["content_html"], "<p>machines \u2014 CPU</p>")
+        self.assertEqual(
+            conn.execute("SELECT value FROM meta WHERE key='schema_version'")
+            .fetchone()[0], "5")
+        conn.close()
+
+
+class TestDecoding(unittest.TestCase):
+    """Bytes to text.
+
+    Getting this wrong corrupts the archive rather than the display, and it
+    does so invisibly: paulgraham.com serves windows-1252 with no charset at
+    all, and decoding that as ISO-8859-1 turns every em dash into U+0097, a
+    control character that renders as nothing.
+    """
+
+    def decode(self, body, ctype="text/html"):
+        return net.Response("u", 200, {"content-type": ctype}, body).text()
+
+    def test_undeclared_windows_1252_keeps_its_punctuation(self):
+        """The Paul Graham case, exactly."""
+        got = self.decode(b"machines \x97 CPU \x97 sitting, Women\x92s")
+        self.assertEqual(got, "machines \u2014 CPU \u2014 sitting, Women\u2019s")
+
+    def test_declared_latin_1_is_decoded_as_windows_1252(self):
+        got = self.decode(b"dash \x97", "text/html; charset=iso-8859-1")
+        self.assertEqual(got, "dash \u2014")
+
+    def test_utf8_wins_over_a_wrong_latin_1_declaration(self):
+        """Otherwise a mislabelled page mojibakes into 'a<euro>' everywhere."""
+        body = "dash \u2014 emoji \U0001F600".encode()
+        self.assertEqual(self.decode(body, "text/html; charset=ISO-8859-1"),
+                         "dash \u2014 emoji \U0001F600")
+
+    def test_meta_charset_is_honoured_when_the_header_is_silent(self):
+        body = "<meta charset='windows-1251'>\u041f\u0440\u0438\u0432\u0435\u0442".encode("cp1251")
+        self.assertIn("\u041f\u0440\u0438\u0432\u0435\u0442", self.decode(body))
+
+    def test_a_bom_outranks_a_wrong_declaration(self):
+        body = "dash \u2014".encode("utf-8-sig")
+        self.assertEqual(self.decode(body, "text/html; charset=iso-8859-1"),
+                         "dash \u2014")
+
+    def test_utf16_is_not_mistaken_for_utf8(self):
+        """UTF-16 ASCII text is full of NULs, which are valid UTF-8."""
+        body = "dash \u2014 emoji \U0001F600".encode("utf-16")
+        self.assertEqual(self.decode(body, "text/html; charset=utf-16"),
+                         "dash \u2014 emoji \U0001F600")
+
+    def test_a_truncated_body_is_still_utf8(self):
+        """_decompress hands back partial bodies; one cut mid-sequence must
+        not send the whole page down the single-byte path."""
+        body = "dash \u2014 emoji \U0001F600".encode()[:-2]
+        self.assertTrue(self.decode(body).startswith("dash \u2014 emoji "))
+
+    def test_a_real_multibyte_encoding_is_left_alone(self):
+        body = "\u3053\u3093\u306b\u3061\u306f".encode("shift_jis")
+        self.assertEqual(self.decode(body, "text/html; charset=shift-jis"),
+                         "\u3053\u3093\u306b\u3061\u306f")
+
+    def test_an_unknown_label_falls_through_to_utf8(self):
+        body = "dash \u2014 \U0001F600".encode()
+        self.assertEqual(self.decode(body, "text/html; charset=x-nonsense"),
+                         "dash \u2014 \U0001F600")
+
+    def test_c1_controls_from_upstream_are_repaired(self):
+        """A page that is valid UTF-8 but carries C1 controls was mangled by
+        someone else's toolchain. In prose they are never anything but a
+        dash or a quote."""
+        body = "dash \u0097 quote \u0092".encode()
+        self.assertEqual(self.decode(body, "text/html; charset=utf-8"),
+                         "dash \u2014 quote \u2019")
+
+    def test_emoji_survive_every_route(self):
+        for ctype in ("text/html", "text/html; charset=utf-8",
+                      "text/html; charset=iso-8859-1"):
+            with self.subTest(ctype=ctype):
+                self.assertIn("\U0001F600",
+                              self.decode("hi \U0001F600".encode(), ctype))
+
+
 class TestPaulGraham(unittest.TestCase):
     """The extractor for 1997-era markup and the refusal to invent dates."""
 
