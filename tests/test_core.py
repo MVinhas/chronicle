@@ -5,6 +5,7 @@ Run: tools/run-tests.sh
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import unittest
 
@@ -892,6 +893,45 @@ class TestNotePreview(unittest.TestCase):
         out = self._line(note="x" * 400)
         self.assertLessEqual(len(out), NOTE_PREVIEW)
         self.assertTrue(out.endswith("\u2026"))
+
+
+class TestPageScroller(unittest.TestCase):
+    """The reader hands its scrolling to the page, so the two must agree.
+
+    The page animates the scroll itself and lands only on whole device
+    pixels, which is what keeps the composited text off half-pixel offsets.
+    Nothing here can exercise the animation -- that needs a browser -- but a
+    rename on either side of the boundary is silent at runtime, because a
+    call to a function the page does not define simply does nothing.
+    """
+
+    @staticmethod
+    def _reader_source():
+        from pathlib import Path
+        import chronicle.ui as ui
+        return (Path(ui.__file__).parent / "reader.py").read_text()
+
+    def _script(self):
+        from chronicle.ui.style import SCRIPT
+        return SCRIPT
+
+    def test_the_page_defines_every_scroller_the_reader_calls(self):
+        script, source = self._script(), self._reader_source()
+        for name in re.findall(r"window\.(chronicleScroll\w*)", source):
+            self.assertIn(f"window.{name} = function", script,
+                          f"reader.py calls {name}, which the page never defines")
+
+    def test_the_reader_asks_for_a_scroll_and_never_drives_one(self):
+        """Scrolling the window from out here would bypass the rounding."""
+        source = self._reader_source()
+        for name in ("window.scrollBy", "window.scrollTo"):
+            self.assertFalse(name in source,
+                             f"reader.py drives the scroll itself with {name}")
+
+    def test_the_page_never_lands_on_a_fraction_of_a_pixel(self):
+        """Every scrollTo in the page goes through the rounding."""
+        for call in re.findall(r"window\.scrollTo\(([^;]*?)\);", self._script()):
+            self.assertIn("wholePixel(", call, f"unrounded scroll: {call}")
 
 
 class TestTimeRemaining(unittest.TestCase):

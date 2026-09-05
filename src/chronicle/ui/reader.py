@@ -101,6 +101,12 @@ class ReaderView(Gtk.Box):
         settings.set_javascript_can_open_windows_automatically(False)
         settings.set_enable_back_forward_navigation_gestures(False)
         settings.set_default_font_family("serif")
+        # The page animates its own scrolling, on whole device pixels. WebKit's
+        # animator works in fractions of one, which leaves the composited text
+        # off its raster grid and soft until something repaints it; anything
+        # this one still handles is better off jumping, which at least lands
+        # somewhere sharp.
+        settings.set_enable_smooth_scrolling(False)
 
         self.webview.set_background_color(_rgba(style.BACKGROUND["light"]))
         self.webview.connect("mouse-target-changed", self._on_mouse_target)
@@ -205,12 +211,14 @@ class ReaderView(Gtk.Box):
         return True
 
     def scroll_by_page(self, direction: int) -> None:
-        self._run_js(
-            f"window.scrollBy({{top: {direction} * (window.innerHeight - 80), "
-            f"behavior: 'smooth'}});")
+        # Through the page's own scroller rather than the engine's: that one
+        # keeps every frame on a whole device pixel, and it knows where the
+        # lines are. The guard is for the placeholder, which has no script.
+        self._run_js(f"window.chronicleScrollPage && "
+                     f"window.chronicleScrollPage({direction});")
 
     def scroll_home(self) -> None:
-        self._run_js("window.scrollTo({top: 0, behavior: 'smooth'});")
+        self._run_js("window.chronicleScrollHome && window.chronicleScrollHome();")
 
     # -- events ------------------------------------------------------------
 

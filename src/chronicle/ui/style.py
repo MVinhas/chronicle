@@ -608,6 +608,148 @@ SCRIPT = r"""
       if (img.parentNode) img.parentNode.replaceChild(d, img);
     });
   });
+
+  // ---- scrolling --------------------------------------------------------
+  //
+  // The page scrolls itself, and every position it comes to rest on -- every
+  // frame of every glide, not just the last one -- is a whole device pixel.
+  //
+  // That second part is the fix for something real. A high-resolution wheel,
+  // the free-spinning kind, reports fractional deltas rather than notches.
+  // WebKit slides the composited layer by the raw amount while the main
+  // thread catches up with a rounded scroll offset, and in between the text
+  // is drawn a fraction of a pixel off the grid it was rasterised on, so it
+  // gets resampled to get there. That is the soft text: nothing repaints it
+  // afterwards, so it stays soft until the next scroll happens to knock it
+  // back onto the grid. Landing only on whole pixels leaves no fraction to
+  // resample, and driving the animation from here rather than asking for
+  // behavior:'smooth' is what makes that possible -- the engine's own
+  // animator is the thing putting the layer between pixels.
+  //
+  // It also means the wheel, the keyboard and the app's own page turns all
+  // move with one motion instead of three.
+
+  var DPR = window.devicePixelRatio || 1;
+  // A quarter of the remaining distance per 60Hz frame: moves on the first
+  // frame, settles in about a fifth of a second.
+  var GLIDE = 0.24;
+  var LINE = parseFloat(getComputedStyle(document.body).lineHeight) || 32;
+  var still = !!(window.matchMedia &&
+                 window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+  var target = 0, gliding = false, lastFrame = 0;
+
+  function scrollSpan() {
+    return Math.max(0, document.body.scrollHeight - window.innerHeight);
+  }
+  function wholePixel(y) { return Math.round(y * DPR) / DPR; }
+  function inRange(y) { return Math.max(0, Math.min(y, scrollSpan())); }
+  // Where a new scroll counts from: wherever the current glide is headed, so
+  // a second turn of the wheel adds to the first instead of restarting it.
+  function from() { return gliding ? target : window.scrollY; }
+
+  function frame(now) {
+    var dt = Math.min(64, (now - lastFrame) || 16);
+    lastFrame = now;
+    var gap = target - window.scrollY;
+    if (Math.abs(gap) <= 1 / DPR) {
+      gliding = false;
+      window.scrollTo(0, wholePixel(target));
+      return;
+    }
+    // Framerate-independent: the same curve at 60Hz and at 144Hz.
+    var move = gap * (1 - Math.pow(1 - GLIDE, dt / 16.667));
+    // Under a pixel the rounding would swallow the step and the glide would
+    // stall just short of where it was going.
+    if (Math.abs(move) < 1) move = gap > 0 ? 1 : -1;
+    var was = window.scrollY;
+    window.scrollTo(0, wholePixel(was + move));
+    if (window.scrollY === was) {
+      // Nowhere left to go -- an image finished loading and the article is
+      // shorter than it was when this glide was aimed. Stop, rather than
+      // asking for a frame forever.
+      gliding = false;
+      return;
+    }
+    requestAnimationFrame(frame);
+  }
+
+  function glideTo(y) {
+    target = inRange(y);
+    if (still) {
+      gliding = false;
+      window.scrollTo(0, wholePixel(target));
+      return;
+    }
+    if (gliding) return;
+    gliding = true;
+    requestAnimationFrame(function (t) { lastFrame = t - 16; frame(t); });
+  }
+
+  // A wheel turned over something that scrolls on its own -- a wide table, a
+  // long note -- belongs to that thing, not to the article.
+  function ownScroller(node) {
+    for (; node && node !== document.body; node = node.parentNode) {
+      if (node.nodeType !== 1) continue;
+      var flow = getComputedStyle(node).overflowY;
+      if ((flow === 'auto' || flow === 'scroll') &&
+          node.scrollHeight > node.clientHeight + 1) return true;
+    }
+    return false;
+  }
+
+  window.addEventListener('wheel', function (ev) {
+    if (ev.ctrlKey || ev.metaKey || ev.defaultPrevented) return;
+    if (Math.abs(ev.deltaX) > Math.abs(ev.deltaY)) return;
+    if (ownScroller(ev.target)) return;
+    var by = ev.deltaY;
+    if (ev.deltaMode === 1) by *= LINE;              // lines
+    else if (ev.deltaMode === 2) by *= window.innerHeight;
+    if (!by) return;
+    ev.preventDefault();
+    glideTo(from() + by);
+  }, { passive: false });
+
+  function typingIn(node) {
+    if (!node || node.nodeType !== 1) return false;
+    return node.tagName === 'TEXTAREA' || node.tagName === 'INPUT' ||
+           node.isContentEditable;
+  }
+
+  // Page Up/Down, space and Home are window accelerators and never reach the
+  // page; these are the keys WebKit would otherwise scroll by itself.
+  document.addEventListener('keydown', function (ev) {
+    if (ev.ctrlKey || ev.altKey || ev.metaKey || ev.defaultPrevented) return;
+    if (typingIn(ev.target)) return;
+    var to;
+    if (ev.key === 'ArrowDown') to = from() + LINE * 3;
+    else if (ev.key === 'ArrowUp') to = from() - LINE * 3;
+    else if (ev.key === 'End') to = scrollSpan();
+    else return;
+    ev.preventDefault();
+    glideTo(to);
+  });
+
+  // A page turn moves by a whole number of lines and leaves two of them
+  // behind, so the eye comes down on a line it has already read rather than
+  // on one sliced in half.
+  window.chronicleScrollPage = function (direction) {
+    var lines = Math.max(1, Math.floor(window.innerHeight / LINE) - 2);
+    glideTo(from() + direction * lines * LINE);
+  };
+
+  window.chronicleScrollHome = function () { glideTo(0); };
+
+  // Restoring a remembered position: no glide, the page has only just
+  // appeared and there is nothing yet to follow with the eye.
+  window.chronicleScrollTo = function (frac) {
+    var span = scrollSpan();
+    if (span <= 0 || !(frac > 0)) return;
+    gliding = false;
+    target = inRange(span * frac);
+    window.scrollTo(0, wholePixel(target));
+  };
+
   // Report scroll position so reading progress survives closing the app.
   var ticking = false;
   window.addEventListener('scroll', function () {
@@ -615,8 +757,8 @@ SCRIPT = r"""
     ticking = true;
     requestAnimationFrame(function () {
       ticking = false;
-      var max = document.body.scrollHeight - window.innerHeight;
-      var frac = max > 0 ? window.scrollY / max : 0;
+      var span = scrollSpan();
+      var frac = span > 0 ? window.scrollY / span : 0;
       if (window.webkit && window.webkit.messageHandlers &&
           window.webkit.messageHandlers.chronicle) {
         window.webkit.messageHandlers.chronicle.postMessage(
@@ -624,10 +766,6 @@ SCRIPT = r"""
       }
     });
   });
-  window.chronicleScrollTo = function (frac) {
-    var max = document.body.scrollHeight - window.innerHeight;
-    if (max > 0 && frac > 0) window.scrollTo(0, max * frac);
-  };
 
   // ---- annotations ------------------------------------------------------
   //
@@ -865,7 +1003,10 @@ SCRIPT = r"""
       } else {
         q.addEventListener('click', function () {
           var mark = document.querySelector('mark.hl[data-hl="' + h.id + '"]');
-          if (mark) mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          if (!mark) return;
+          var box = mark.getBoundingClientRect();
+          glideTo(window.scrollY + box.top -
+                  (window.innerHeight - box.height) / 2);
         });
       }
       marksList.appendChild(li);

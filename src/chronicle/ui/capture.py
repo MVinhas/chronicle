@@ -11,7 +11,7 @@ Driven entirely by environment variables so it never affects normal runs:
     CHRONICLE_SHOT_QUIT     1 to exit after capturing (default 1)
     CHRONICLE_SHOT_SIZE     WxH to force the window to, e.g. 1280x800
     CHRONICLE_SHOT_ARTICLE  article id to open, from the top, unscrolled
-    CHRONICLE_SHOT_SCROLL   0..1 fraction to scroll the library list to
+    CHRONICLE_SHOT_SCROLL   0..1 fraction to scroll to (library list or article)
     CHRONICLE_SHOT_SCOPE    library filter to select (e.g. highlighted, skipped)
     CHRONICLE_SHOT_SELECT   word to select in the article, raising its popup
     CHRONICLE_SHOT_DEFINE   1 to then press Define, for the dictionary card
@@ -207,6 +207,18 @@ def _scroll_library(window, fraction: float, delay: int = 700) -> None:
     GLib.timeout_add(delay, apply)
 
 
+def _scroll_reader(window, fraction: float, delay: int = 900) -> None:
+    """Park the article partway down, for a shot of the body rather than the top."""
+    reader = getattr(window, "reader", None)
+    if reader is None:
+        return
+    # `load_html` is asynchronous, and the page's own scroller only exists
+    # once its script has run.
+    GLib.timeout_add(delay, lambda: reader._run_js(
+        f"window.chronicleScrollTo && window.chronicleScrollTo("
+        f"{max(0.0, min(1.0, fraction))});") and False)
+
+
 def capture_window(window: Gtk.Window, path: str | Path) -> bool:
     """Render a realized window to a PNG via its own GSK renderer."""
     native = window.get_native()
@@ -315,6 +327,8 @@ def arm(window) -> None:
                     button.set_active(True)
             if scroll and page == "library":
                 _scroll_library(window, float(scroll))
+            if scroll and page == "reader":
+                _scroll_reader(window, float(scroll))
             if select and page == "reader":
                 _select_in_reader(
                     window, select,

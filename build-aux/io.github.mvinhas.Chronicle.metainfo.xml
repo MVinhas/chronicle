@@ -99,6 +99,15 @@
   </recommends>
 
   <releases>
+    <release version="1.7.1" date="2026-09-05">
+      <description>
+        <ul>
+          <li>The reader scrolls itself now, and glides rather than jumps — one motion for the wheel, the arrow keys and the space bar alike.</li>
+          <li>Fixed text going faintly soft after a scroll and staying that way until the next one. A high-resolution wheel reports fractions of a pixel, and the engine was leaving the article half a pixel off the grid it had been drawn on, so it was resampled rather than redrawn. Every frame of every scroll now lands on a whole pixel.</li>
+          <li>A page turn moves by a whole number of lines and leaves two behind, so you come down on a line you have already read instead of one cut in half.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.7.0" date="2026-09-04">
       <description>
         <ul>

@@ -762,8 +762,9 @@ class MainWindow(Adw.ApplicationWindow):
         pairs = [
             ("Next article", "→ / N / J / Page Down"),
             ("Previous article", "← / P / K / Page Up"),
-            ("Scroll", "Space / Shift+Space"),
-            ("Back to top", "Home"),
+            ("Scroll a page", "Space / Shift+Space"),
+            ("Scroll a few lines", "\u2191 / \u2193"),
+            ("Start / end of article", "Home / End"),
             ("Favourite", "F"),
             ("Mark read / unread", "R"),
             ("Skip this article", "S"),

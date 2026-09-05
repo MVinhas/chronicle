@@ -69,7 +69,9 @@ It remembers where you got to.
 |---|---|
 | `→` `N` `J` | next article |
 | `←` `P` `K` | previous article |
-| `Space` | scroll |
+| `Space` | scroll a page |
+| `↑` `↓` | scroll a few lines |
+| `Home` `End` | start / end of the article |
 | `F` | favourite |
 | `R` | mark read / unread |
 | `S` | skip, and go to the next |
@@ -78,6 +80,16 @@ It remembers where you got to.
 | `Ctrl+T` | light / dark theme |
 | `F5` | fetch new posts |
 | `Shift+F5` | full archive scan |
+
+The page glides rather than jumps, and it scrolls itself rather than leaving
+it to the browser engine underneath — the wheel, the arrow keys and the space
+bar all move with the same motion, and every frame of it lands on a whole
+screen pixel. That last part is what keeps the text sharp: a high-resolution
+wheel reports fractions of a pixel, and an article left sitting half a pixel
+off the grid it was drawn on gets resampled instead of redrawn, which reads as
+text going faintly soft until you scroll again. A page turn moves by a whole
+number of lines and leaves two behind, so you come down on a line you have
+already read.
 
 Articles are stored on your machine, images included, so everything keeps
 working offline.
