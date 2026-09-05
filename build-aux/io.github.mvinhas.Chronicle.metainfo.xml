@@ -99,6 +99,15 @@
   </recommends>
 
   <releases>
+    <release version="1.7.3" date="2026-09-05">
+      <description>
+        <ul>
+          <li>Define now works on words that carry accents. <em>über</em>, <em>façade</em>, <em>naïve</em> and <em>Gödel</em> were passed over by a gate that accepted unaccented letters only, so the one kind of word you are most likely to want defined was the one kind that offered nothing.</li>
+          <li>The same word is now one word however the page spelled it, whether the accent came as a single character or as a letter with a mark added after it — so a word looked up once stays looked up, rather than being stored twice and fetched again.</li>
+          <li>Words in other scripts still get no Define button. This asks English Wiktionary, which has no English entry for them, and a button that always came back empty would be worse than no button.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.7.2" date="2026-09-05">
       <description>
         <ul>

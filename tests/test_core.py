@@ -1226,6 +1226,24 @@ class TestDictionaryWords(unittest.TestCase):
         for text in ("1832", "£40", "—", "http://example.com"):
             self.assertIsNone(self._word(text), text)
 
+    def test_a_borrowed_word_keeps_its_accents(self):
+        """English Wiktionary has entries for these; the gate used to be ASCII
+        and passed them over."""
+        for text in ("über", "façade", "naïve", "jalapeño", "Gödel", "Škoda"):
+            self.assertEqual(self._word(text), text.casefold(), text)
+
+    def test_a_decomposed_accent_is_the_same_word_as_a_composed_one(self):
+        """The same word arrives composed from one page and decomposed from
+        another; two cache rows for one word would be a bug you only notice
+        offline."""
+        self.assertEqual(self._word("u\u0308ber"), self._word("über"))
+
+    def test_a_non_latin_word_is_not_offered(self):
+        """This asks English Wiktionary, whose page for these carries no
+        English section -- the button would always come back empty."""
+        for text in ("Привет", "こんにちは", "αβγδ", "שלום"):
+            self.assertIsNone(self._word(text), text)
+
 
 class TestDictionaryEntries(unittest.TestCase):
     """Folding Wiktionary's answer into one card's worth."""

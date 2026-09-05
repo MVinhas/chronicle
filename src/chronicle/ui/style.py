@@ -1218,10 +1218,12 @@ SCRIPT = r"""
   // dictionary.normalise() on the Python side; the app checks again before
   // asking anyone, this only decides whether to offer the button.
   function headword(quote) {
-    var word = quote.replace(/’/g, "'").replace(/^[^\w']+|[^\w']+$/g, '');
+    var word = quote.normalize('NFC').replace(/’/g, "'")
+                    .replace(/^[^\p{L}\p{N}']+|[^\p{L}\p{N}']+$/gu, '');
     if (!word || /\s/.test(word)) return '';
     word = word.toLowerCase().replace(/'s$/, '');
-    return /^[a-z][a-z'\-]{0,40}$/.test(word) ? word : '';
+    return /^\p{Script=Latin}[\p{Script=Latin}'\-]{0,40}$/u.test(word)
+      ? word : '';
   }
 
   document.addEventListener('mousedown', function (ev) {

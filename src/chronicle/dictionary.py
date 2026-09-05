@@ -24,6 +24,7 @@ import html
 import json
 import logging
 import re
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -45,9 +46,17 @@ USER_AGENT = (f"Chronicle/{__version__} (https://github.com/MVinhas/chronicle; "
 MAX_SENSES = 4
 MAX_PER_MEANING = 2
 
-# What counts as a word worth looking up. Letters, with the punctuation that
-# lives *inside* English words (Wiktionary has an entry for "ne'er-do-well").
-_WORD = re.compile(r"^[a-z][a-z'\-]{0,40}$")
+# What counts as a word worth looking up: Latin-script letters, with the
+# punctuation that lives *inside* English words (Wiktionary has an entry for
+# "ne'er-do-well"), and the accents a borrowed one keeps -- "uber", "facade"
+# and "naive" are all also spelled the other way, and both spellings deserve
+# the button.
+#
+# Latin script rather than letters at large, because this asks *English*
+# Wiktionary: its page for a Greek or Japanese word carries no English
+# section, so a wider gate would offer a button that always came back empty.
+_INNER = "'-"
+_MAX_HEADWORD = 41
 _TRIM = re.compile(r"^[^\w]+|[^\w]+$")
 
 # Wiktionary's definitions arrive as fragments of the rendered page: wikilinks
@@ -62,14 +71,36 @@ def normalise(text: str) -> str | None:
     entry, "the most quixotic of" does not, and offering to define a sentence
     would be offering something that always fails.
     """
-    word = _TRIM.sub("", (text or "").strip().replace("’", "'"))
+    # NFC first: the same word reaches us composed from one page and
+    # decomposed from another, and only the composed form is a run of letters
+    # -- a combining accent is not one, so "u" + U+0308 would fail the gate
+    # below and land in the cache as a second spelling of the same word.
+    text = unicodedata.normalize("NFC", (text or "").strip())
+    word = _TRIM.sub("", text.replace("’", "'"))
     if not word or " " in word or "\n" in word:
         return None
     word = word.casefold()
     # Possessives are not headwords; the word underneath one is.
     if word.endswith("'s"):
         word = word[:-2]
-    return word if _WORD.match(word) else None
+    return word if _is_headword(word) else None
+
+
+def _latin_letter(ch: str) -> bool:
+    """Whether a character is a letter in the Latin script.
+
+    `re` has no \\p{Script=Latin} escape and unicodedata carries no script
+    table, so the character's own name is the check actually available here.
+    It is exact for the purpose: every Latin letter is named "LATIN ...".
+    """
+    return ch.isalpha() and unicodedata.name(ch, "").startswith("LATIN")
+
+
+def _is_headword(word: str) -> bool:
+    """Whether a normalised selection is shaped like a dictionary headword."""
+    return (0 < len(word) <= _MAX_HEADWORD
+            and _latin_letter(word[0])
+            and all(_latin_letter(ch) or ch in _INNER for ch in word[1:]))
 
 
 def cached(conn, word: str) -> dict | None:
