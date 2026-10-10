@@ -703,6 +703,17 @@ def neighbour(conn, article_id: int, direction: int, scope: str = "all",
     cur = get_article(conn, article_id)
     if cur is None:
         return None
+    return neighbour_of(conn, cur, direction, scope=scope, hide_read=hide_read)
+
+
+def neighbour_of(conn, cur, direction: int, scope: str = "all",
+                 hide_read: bool = False):
+    """`neighbour()` for a row already in hand, which need not still exist.
+
+    Removing a blog deletes the article the reader is sitting on, but the row
+    the reader remembered still says where it was in the reading order -- and
+    that is all this needs to find what came either side of it.
+    """
     where, args = _filter_sql(scope, include_disabled=False, hide_read=hide_read)
     # Build a strict lexicographic comparison on (null-rank, published_at, source_order, id)
     nullrank = 1 if cur["published_at"] is None else 0

@@ -99,6 +99,13 @@
   </recommends>
 
   <releases>
+    <release version="1.9.1" date="2026-10-10">
+      <description>
+        <ul>
+          <li>Removing a blog while one of its articles was open in the reader no longer leaves you stuck on it. The article was deleted along with the blog, but the reader kept showing it, and next, previous and skip all failed because each one starts from the article you are on. The reader now carries on from where that article sat in the reading order — the one after it, or the one before if it was the last — without leaving the Blogs page.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.9.0" date="2026-09-05">
       <description>
         <ul>

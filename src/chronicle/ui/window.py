@@ -448,7 +448,8 @@ class MainWindow(Adw.ApplicationWindow):
         if shows_resume_hint(stored):
             self._show_resume_hint(stored)
 
-    def open_article(self, article_id: int, remember: bool = True) -> None:
+    def open_article(self, article_id: int, remember: bool = True,
+                     present: bool = True) -> None:
         article = db.get_article(self._conn, article_id)
         if article is None:
             return
@@ -464,7 +465,8 @@ class MainWindow(Adw.ApplicationWindow):
         self.reader.show_article(article, scroll)
         db.state_set(self._conn, "current_article_id", article_id)
         self._update_reader_chrome(article)
-        self.show_page("reader")
+        if present:
+            self.show_page("reader")
 
     def _state_of(self, article_id: int):
         return self._conn.execute(
@@ -523,8 +525,34 @@ class MainWindow(Adw.ApplicationWindow):
             db.neighbour(self._conn, article["id"], +1,
                          hide_read=self.hide_read) is not None)
 
-    def go_next(self, *_):
+    def _current_vanished(self) -> bool:
+        """Move off the open article if it is no longer in the library.
+
+        Removing a blog deletes its articles, and the one being read goes with
+        them. Every queue lookup starts from the open article, so left alone
+        the reader would be stuck on a ghost: no next, no previous, and a skip
+        that cannot be recorded. Its remembered row still knows where it sat,
+        so carry on from there -- quietly, without leaving the page the
+        removal was made from.
+        """
         if self.current is None:
+            return False
+        if db.get_article(self._conn, self.current["id"]) is not None:
+            return False
+        gone, self.current = self.current, None
+        nxt = (db.neighbour_of(self._conn, gone, +1, hide_read=self.hide_read)
+               or db.neighbour_of(self._conn, gone, -1,
+                                  hide_read=self.hide_read))
+        if nxt is not None:
+            self.open_article(nxt["id"], present=False)
+        else:
+            page = self.stack.get_visible_child_name()
+            self.resume()
+            self.show_page(page)
+        return True
+
+    def go_next(self, *_):
+        if self.current is None or self._current_vanished():
             return
         self._flush_scroll()
         db.set_read(self._conn, self.current["id"], True)
@@ -538,7 +566,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.open_article(nxt["id"])
 
     def go_previous(self, *_):
-        if self.current is None:
+        if self.current is None or self._current_vanished():
             return
         self._flush_scroll()
         prev = db.neighbour(self._conn, self.current["id"], -1,
@@ -557,7 +585,7 @@ class MainWindow(Adw.ApplicationWindow):
         neighbour afterwards would be asking about a row that is no longer
         there. Deliberately not marked read -- a skip is its own verdict.
         """
-        if self.current is None:
+        if self.current is None or self._current_vanished():
             return
         article_id = self.current["id"]
         title = self.current["title"] or "Untitled"
@@ -808,6 +836,8 @@ class MainWindow(Adw.ApplicationWindow):
     def refresh_library(self) -> None:
         if hasattr(self, "library"):
             self.library.refresh_if_at_top()
+        if self._current_vanished():
+            return
         if self.current is not None:
             self._update_reader_chrome(self.current)
 

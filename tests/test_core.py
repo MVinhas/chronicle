@@ -381,6 +381,25 @@ class TestQueue(unittest.TestCase):
         self.assertIsNone(self.db.neighbour(self.conn, c, +1))
         self.assertIsNone(self.db.neighbour(self.conn, a, -1))
 
+    def test_neighbour_of_a_deleted_article(self):
+        """Removing a blog must not strand the reader on the article it took."""
+        a = self.add("a", "2001-01-01T00:00:00")
+        other = self.db.add_source(self.conn, "o", "Other", "generic",
+                                   "https://o.example")
+        gone, _ = self.db.upsert_article(
+            self.conn, other, "g", url="https://o.example/g", title="g",
+            published_at="2002-01-01T00:00:00", date_precision="day",
+            date_confidence="exact", date_source="test")
+        self.conn.execute("UPDATE articles SET content_status='ok' WHERE id=?",
+                          (gone,))
+        c = self.add("c", "2003-01-01T00:00:00")
+        held = self.db.get_article(self.conn, gone)
+        self.db.delete_source(self.conn, other)
+        self.assertIsNone(self.db.get_article(self.conn, gone))
+        self.assertIsNone(self.db.neighbour(self.conn, gone, +1))
+        self.assertEqual(self.db.neighbour_of(self.conn, held, +1)["id"], c)
+        self.assertEqual(self.db.neighbour_of(self.conn, held, -1)["id"], a)
+
     def test_same_date_is_broken_by_source_order(self):
         first = self.add("f", "2005-01-01T00:00:00", order=1)
         second = self.add("s", "2005-01-01T00:00:00", order=2)
