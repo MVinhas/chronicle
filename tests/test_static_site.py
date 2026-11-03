@@ -43,7 +43,8 @@ def build_site() -> FakeNet:
         links.append(f'<a href="/old-{i}/">Old {i}</a>')
     # Entries that are not articles: the homepage, another host, a podcast,
     # and the feed itself.
-    for junk in (f"{SITE}/", "https://elsewhere.example/x/",
+    for junk in (f"{SITE}/", "https://unsung.ares.example/",
+                 "https://elsewhere.example/x/",
                  f"{SITE}/audio/ep1.mp3", f"{SITE}/main.rss"):
         entries.append(f'<entry><title>junk</title><link rel="alternate" '
                        f'href="{junk}"/><updated>2026-09-01T00:00:00Z</updated>'
@@ -55,6 +56,7 @@ def build_site() -> FakeNet:
            'type="application/atom+xml" href="/main.rss"></head><body>'
            + "".join(links) + '<a href="/main.rss">feed</a>'
            '<a href="/audio/ep1.mp3">listen</a></body></html>')
+    fn.add("https://elsewhere.example/x/", _page("Elsewhere", "1 Jan 2020 / 10:00"))
     fn.add(SITE + "/robots.txt",
            "User-agent: *\nCrawl-delay: 10\nDisallow: /private/\n")
     return fn
@@ -98,7 +100,8 @@ class TestStaticSite(SyncHarness):
     def test_non_articles_in_the_feed_are_dropped(self):
         fn = build_site()
         self.sync(fn)
-        self.assertEqual(fn.count("elsewhere.example"), 0)
+        self.assertEqual(fn.count("unsung.ares.example"), 0)
+        self.assertFalse([r for r in self.rows() if "elsewhere" in r["url"]])
         self.assertEqual(fn.count(".mp3"), 0)
         self.assertEqual(fn.count("main.rss/"), 0)
 

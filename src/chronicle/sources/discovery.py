@@ -79,12 +79,13 @@ class Candidate:
     date: dates.PubDate = dates.UNKNOWN
     feed_html: str | None = None
     order: int = 0
+    foreign: bool = False    # linked from the feed on an unrelated host
 
     @property
     def complete(self) -> bool:
         """Nothing a page fetch could add that we need for discovery."""
         return bool(self.feed_html and self.date.known and self.title
-                    and not self.summary_only)
+                    and not self.summary_only and not self.foreign)
 
     @property
     def summary_only(self) -> bool:
@@ -592,10 +593,15 @@ def _resolve_numeric_ensemble(numeric: list[tuple[str, int, int]],
 # merging
 # --------------------------------------------------------------------------
 
-def _same_site(url: str, host: str | None) -> bool:
+def same_site(url: str, host: str | None) -> bool:
+    """Is this URL on the site's host, or a subdomain of it (or it of a
+    subdomain)? A plain suffix match stands in for the public-suffix list."""
     if not host:
         return True
-    return urlparse(url).netloc.lower().removeprefix("www.") == host
+    other = urlparse(url).netloc.lower().removeprefix("www.").split(":")[0]
+    host = host.lower().removeprefix("www.").split(":")[0]
+    return (other == host or other.endswith("." + host)
+            or host.endswith("." + other))
 
 
 def merge(feed_items: list[FeedItem], sitemap_urls: list[str],
@@ -605,11 +611,9 @@ def merge(feed_items: list[FeedItem], sitemap_urls: list[str],
     pool: dict[str, Candidate] = {}
     order = 0
 
-    host = host.lower().removeprefix("www.") if host else None
-
     def get(url: str) -> Candidate | None:
         nonlocal order
-        if not in_scope(url) or not _same_site(url, host):
+        if not in_scope(url):
             return None
         guid = net.canonical_url(url)
         cand = pool.get(guid)
@@ -643,6 +647,12 @@ def merge(feed_items: list[FeedItem], sitemap_urls: list[str],
         cand = get(item.link)
         if cand is None:
             continue
+        # A link on an unrelated host is either a feed proxy (FeedBurner)
+        # whose links redirect home, or an off-site pointer. Which one is only
+        # known after the page is fetched, so it must not be taken on the
+        # feed's word: `foreign` forces a fetch and a look at the final URL.
+        if not same_site(item.link, host):
+            cand.foreign = True
         cand.evidence.add("feed")
         if item.title and not cand.title:
             cand.title = item.title

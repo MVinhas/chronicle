@@ -194,6 +194,8 @@ class GenericSource(Source):
         try:
             resp = net.fetch(cand.url)
         except net.FetchError:
+            if cand.foreign:
+                return None
             if cand.feed_html or cand.date.known:
                 # The page is gone but the feed vouched for it; keep what the
                 # feed gave rather than dropping a real post.
@@ -202,6 +204,11 @@ class GenericSource(Source):
                             source_order=cand.order, raw_html=cand.feed_html,
                             base_url=cand.url,
                             content_source="feed" if cand.feed_html else "")
+            return None
+        if cand.foreign and not discovery.same_site(
+                resp.url, urlparse(self.homepage or "").netloc):
+            # An off-site pointer, not a post of this blog.
+            ctx.reject(cand.guid)
             return None
         html = resp.text()
         soup = htmlutil.parse(html)

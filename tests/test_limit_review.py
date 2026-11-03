@@ -243,3 +243,68 @@ class TestApiTakeover(SyncHarness):
         prog = run_sync(fn, self.dbfile, spec=spec)
         self.assertNotIn("up to date", prog.message)
         self.assertTrue(prog.warnings)
+
+
+def _rss(items):
+    out = ('<?xml version="1.0"?><rss version="2.0" xmlns:content="http://purl.'
+           'org/rss/1.0/modules/content/"><channel><title>B</title>')
+    for it in items:
+        out += (f"<item><title>{it['title']}</title><link>{it['link']}</link>"
+                f"<pubDate>{it['date']}</pubDate><content:encoded><![CDATA["
+                f"<p>{it['html']}</p>]]></content:encoded></item>")
+    return out + "</channel></rss>"
+
+
+def _home(fn):
+    fn.add(BASE + "/", '<html><head><title>B</title><link rel="alternate" '
+           'type="application/rss+xml" href="/feed/"></head></html>')
+
+
+_SPEC = {"name": "B", "plugin": "generic", "homepage": BASE, "config": {}}
+
+
+class TestFeedHosts(SyncHarness):
+    def _items(self, link_for):
+        from fakesite import PARA
+        return [dict(title=f"P{i}", link=link_for(i),
+                     date=f"Thu, {10 + i} Sep 2026 00:00:00 GMT", html=PARA * 3)
+                for i in range(5)]
+
+    def test_feedburner_style_redirect_links_are_stored_under_the_real_url(self):
+        fn = FakeNet()
+        _home(fn)
+        for i in range(5):
+            fn.add(f"{BASE}/post-{i}/", post_html(f"P{i}", f"2026-09-{10 + i}T00:00:00+00:00"))
+            fn.redirect(f"https://feedproxy.example/~r/B/{i}/", f"{BASE}/post-{i}/")
+        fn.add(BASE + "/feed/", _rss(self._items(
+            lambda i: f"https://feedproxy.example/~r/B/{i}/")))
+        run_sync(fn, self.dbfile, spec=_SPEC)
+        rows = self.urls()
+        self.assertEqual(sorted(r["url"] for r in rows),
+                         [f"{BASE}/post-{i}/" for i in range(5)])
+
+    def test_posts_on_a_subdomain_of_the_site_are_kept(self):
+        fn = FakeNet()
+        _home(fn)
+        fn.add(BASE + "/feed/", _rss(self._items(
+            lambda i: f"https://blog.blog.example/post-{i}/")))
+        run_sync(fn, self.dbfile, spec=_SPEC)
+        self.assertEqual(len(self.urls()), 5)
+        self.assertEqual(fn.count("blog.blog.example"), 0)   # bodies from the feed
+
+    def test_a_foreign_page_that_does_not_redirect_home_is_dropped(self):
+        fn = FakeNet()
+        _home(fn)
+        for i in range(3):
+            fn.add(f"https://other.example/x-{i}/", post_html(f"X{i}", "2026-09-10T00:00:00+00:00"))
+        fn.add(BASE + "/feed/", _rss(self._items(lambda i: f"https://other.example/x-{i % 3}/")))
+        run_sync(fn, self.dbfile, spec=_SPEC)
+        self.assertEqual(len(self.urls()), 0)
+
+    def test_root_of_any_other_host_is_dropped_unrequested(self):
+        fn = FakeNet()
+        _home(fn)
+        fn.add(BASE + "/feed/", _rss(self._items(lambda i: "https://unsung.blog.example/")))
+        run_sync(fn, self.dbfile, spec=_SPEC)
+        self.assertEqual(len(self.urls()), 0)
+        self.assertEqual(fn.count("unsung"), 0)
