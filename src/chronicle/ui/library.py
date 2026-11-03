@@ -310,7 +310,8 @@ class LibraryView(Gtk.Box):
         conn = self.get_conn()
         rows = db.queue(conn, scope=self.scope, limit=PAGE_SIZE,
                         offset=self._offset, search=self.search_text or None,
-                        hide_read=self.hide_read)
+                        hide_read=self.hide_read,
+                        newest_first=db.reading_newest_first(conn))
         if len(rows) < PAGE_SIZE:
             self._exhausted = True
         self._offset += len(rows)

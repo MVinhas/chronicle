@@ -175,7 +175,10 @@ def cmd_stats(args) -> int:
 
 def cmd_queue(args) -> int:
     conn = db.get_conn()
-    rows = db.queue(conn, scope=args.scope, limit=args.limit)
+    newest = (db.reading_newest_first(conn) if args.order is None
+              else args.order == "newest")
+    rows = db.queue(conn, scope=args.scope, limit=args.limit,
+                    newest_first=newest)
     for r in rows:
         d = dates.format_short(r["published_at"], r["date_precision"])
         flag = "*" if r["favourite_at"] else " "
@@ -252,6 +255,9 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=["all", "unread", "read", "favourites",
                             "annotated", "highlighted", "skipped"])
     q.add_argument("--limit", type=int, default=40)
+    q.add_argument("--order", choices=["oldest", "newest"], default=None,
+                   help="list oldest or newest first (the app's saved "
+                        "reading direction is used otherwise)")
     q.set_defaults(fn=cmd_queue)
 
     x = sub.add_parser("export", help="dump the library as JSON")

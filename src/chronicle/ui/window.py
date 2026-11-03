@@ -99,6 +99,16 @@ class MainWindow(Adw.ApplicationWindow):
         """Shared with the library view, so the queue and the reader agree."""
         return db.state_get(self._conn, "hide_read", "0") == "1"
 
+    @property
+    def newest_first(self) -> bool:
+        """Reading direction, saved so the next launch keeps it."""
+        return db.reading_newest_first(self._conn)
+
+    @property
+    def _order(self) -> dict:
+        """The order-dependent arguments every queue lookup must agree on."""
+        return {"hide_read": self.hide_read, "newest_first": self.newest_first}
+
     @staticmethod
     def _load_css() -> None:
         provider = Gtk.CssProvider()
@@ -133,6 +143,7 @@ class MainWindow(Adw.ApplicationWindow):
         menu.append("Fetch new posts", "win.sync")
         menu.append("Full archive scan", "win.full-scan")
         menu.append("Open original in browser", "win.open-external")
+        menu.append("Read newest first", "win.read-backwards")
         menu.append_section("Appearance", theme_menu)
         extras = Gio.Menu()
         extras.append("Keyboard shortcuts", "win.shortcuts")
@@ -262,6 +273,7 @@ class MainWindow(Adw.ApplicationWindow):
             ("scroll-up", lambda *_: self.reader.scroll_by_page(-1), [], ["<Shift>space"]),
             ("top", lambda *_: self.reader.scroll_home(), [], ["Home"]),
             ("hide-read", self.toggle_hide_read, [], ["h"]),
+            ("read-backwards", self.toggle_read_backwards, [], ["b"]),
             ("cycle-theme", self.cycle_theme, ["<Control>t"], []),
             ("shortcuts", self.show_shortcuts, ["<Control>question"], []),
             ("escape", self.on_escape, ["Escape"], []),
@@ -272,7 +284,12 @@ class MainWindow(Adw.ApplicationWindow):
         self._bare_accels: dict[str, list[str]] = {}
 
         for name, handler, modified, bare in specs:
-            action = Gio.SimpleAction.new(name, None)
+            if name == "read-backwards":
+                # Stateful so the menu entry shows as a check item.
+                action = Gio.SimpleAction.new_stateful(
+                    name, None, GLib.Variant("b", self.newest_first))
+            else:
+                action = Gio.SimpleAction.new(name, None)
             action.connect("activate", handler)
             self.add_action(action)
             detailed = f"win.{name}"
@@ -388,6 +405,21 @@ class MainWindow(Adw.ApplicationWindow):
             title="Hiding articles you have read" if now
             else "Showing all articles", timeout=2))
 
+    def toggle_read_backwards(self, *_):
+        """Switch between oldest-first and newest-first reading."""
+        now = not self.newest_first
+        db.set_reading_newest_first(self._conn, now)
+        action = self.lookup_action("read-backwards")
+        if action is not None:
+            action.set_state(GLib.Variant("b", now))
+        if hasattr(self, "library"):
+            self.library.reload()
+        if self.current is not None:
+            self._update_reader_chrome(self.current)
+        self.toasts.add_toast(Adw.Toast(
+            title="Reading newest first" if now else "Reading oldest first",
+            timeout=2))
+
     def show_page(self, name: str) -> None:
         self.stack.set_visible_child_name(name)
 
@@ -419,8 +451,10 @@ class MainWindow(Adw.ApplicationWindow):
     # -- reading -----------------------------------------------------------
 
     def resume(self) -> None:
-        """Open wherever the reader left off, or the oldest unread article."""
-        article = db.resume_article(self._conn)
+        """Open wherever the reader left off, or the first unread article
+        in the current reading direction."""
+        article = db.resume_article(self._conn,
+                                    newest_first=self.newest_first)
         if article is None:
             counts = db.queue_counts(self._conn)
             if counts["all"]:
@@ -495,7 +529,8 @@ class MainWindow(Adw.ApplicationWindow):
             left = db.queue_counts(self._conn)["unread"]
             place = f"{left:,} article{'' if left == 1 else 's'} left".replace(",", " ")
         else:
-            pos, total = db.position_in_queue(self._conn, article["id"])
+            pos, total = db.position_in_queue(self._conn, article["id"],
+                                            newest_first=self.newest_first)
             place = f"{pos:,} of {total:,}".replace(",", " ")
 
         # The line is rebuilt from a stable prefix plus a time that changes on
@@ -520,10 +555,10 @@ class MainWindow(Adw.ApplicationWindow):
 
         self.prev_button.set_sensitive(
             db.neighbour(self._conn, article["id"], -1,
-                         hide_read=self.hide_read) is not None)
+                         **self._order) is not None)
         self.next_button.set_sensitive(
             db.neighbour(self._conn, article["id"], +1,
-                         hide_read=self.hide_read) is not None)
+                         **self._order) is not None)
 
     def _current_vanished(self) -> bool:
         """Move off the open article if it is no longer in the library.
@@ -540,9 +575,8 @@ class MainWindow(Adw.ApplicationWindow):
         if db.get_article(self._conn, self.current["id"]) is not None:
             return False
         gone, self.current = self.current, None
-        nxt = (db.neighbour_of(self._conn, gone, +1, hide_read=self.hide_read)
-               or db.neighbour_of(self._conn, gone, -1,
-                                  hide_read=self.hide_read))
+        nxt = (db.neighbour_of(self._conn, gone, +1, **self._order)
+               or db.neighbour_of(self._conn, gone, -1, **self._order))
         if nxt is not None:
             self.open_article(nxt["id"], present=False)
         else:
@@ -556,8 +590,7 @@ class MainWindow(Adw.ApplicationWindow):
             return
         self._flush_scroll()
         db.set_read(self._conn, self.current["id"], True)
-        nxt = db.neighbour(self._conn, self.current["id"], +1,
-                           hide_read=self.hide_read)
+        nxt = db.neighbour(self._conn, self.current["id"], +1, **self._order)
         if nxt is None:
             self.toasts.add_toast(Adw.Toast(title="That was the last article",
                                             timeout=3))
@@ -570,9 +603,9 @@ class MainWindow(Adw.ApplicationWindow):
             return
         self._flush_scroll()
         prev = db.neighbour(self._conn, self.current["id"], -1,
-                            hide_read=self.hide_read)
+                            **self._order)
         if prev is None:
-            self.toasts.add_toast(Adw.Toast(title="This is the oldest article",
+            self.toasts.add_toast(Adw.Toast(title="This is the first article",
                                             timeout=3))
             return
         self.open_article(prev["id"])
@@ -590,7 +623,7 @@ class MainWindow(Adw.ApplicationWindow):
         article_id = self.current["id"]
         title = self.current["title"] or "Untitled"
         self._flush_scroll()
-        nxt = db.neighbour(self._conn, article_id, +1, hide_read=self.hide_read)
+        nxt = db.neighbour(self._conn, article_id, +1, **self._order)
         db.set_skipped(self._conn, article_id, True)
 
         toast = Adw.Toast(title=f"Skipped “{_shorten(title)}”", timeout=5,
@@ -858,6 +891,7 @@ class MainWindow(Adw.ApplicationWindow):
             ("Fetch new posts", "F5"),
             ("Full archive scan", "Shift+F5"),
             ("Hide / show read articles", "H"),
+            ("Read newest / oldest first", "B"),
             ("Switch theme", "Ctrl+T"),
             ("Open original", "Ctrl+O"),
         ]

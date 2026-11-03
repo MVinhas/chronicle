@@ -65,6 +65,12 @@ goes slowly on purpose so as not to hammer anyone's website. After that,
 Open it, and you're on the next article. Read it, press `→`, read the next one.
 It remembers where you got to.
 
+Prefer to start from the latest post and work backwards? Press `B` (or choose
+**Read newest first** in the menu). Next then means the next-older article, the
+library lists newest first, and undated articles stay at the end either way.
+If you have no place saved, you start at the newest unread article; otherwise
+you stay where you were. The choice is remembered.
+
 | | |
 |---|---|
 | `→` `N` `J` | next article |
@@ -78,6 +84,8 @@ It remembers where you got to.
 | `L` / `Esc` | back to the list |
 | `Ctrl+F` | search |
 | `Ctrl+T` | light / dark theme |
+| `B` | read newest first / oldest first |
+| `H` | hide / show read articles |
 | `F5` | fetch new posts |
 | `Shift+F5` | full archive scan |
 

@@ -693,21 +693,63 @@ def get_article(conn, article_id: int):
         (article_id,)).fetchone()
 
 
+def reading_newest_first(conn) -> bool:
+    """The saved reading direction: False = oldest first (default)."""
+    return state_get(conn, "newest_first", "0") == "1"
+
+
+def set_reading_newest_first(conn, newest_first: bool) -> None:
+    state_set(conn, "newest_first", "1" if newest_first else "0")
+
+
+def _sequence_cmp(cur, newest_first: bool, after: bool) -> tuple[str, list]:
+    """SQL for "comes after (or before) `cur` in the reading sequence".
+
+    The sequence is (undated-rank, published_at, source_order, id): undated
+    articles are last in *both* directions, and only the tail of the key flips
+    when reading newest first. The comparison is strictly lexicographic, so
+    ties on date and source_order fall through to the id.
+    """
+    nullrank = 1 if cur["published_at"] is None else 0
+    pub = cur["published_at"]
+    # Within the dated/undated group, "after" means larger when reading
+    # oldest first and smaller when reading newest first.
+    gt = after != newest_first
+    op = ">" if gt else "<"
+    nr_op = ">" if after else "<"
+    cmp = (f"((a.published_at IS NULL) {nr_op} ?) OR ((a.published_at IS NULL) = ? AND ("
+           f"COALESCE(a.published_at,'') {op} COALESCE(?,'') OR (COALESCE(a.published_at,'') = COALESCE(?,'') AND ("
+           f"a.source_order {op} ? OR (a.source_order = ? AND a.id {op} ?)))))")
+    return cmp, [nullrank, nullrank, pub, pub,
+                 cur["source_order"], cur["source_order"], cur["id"]]
+
+
+def _sequence_order(newest_first: bool, forward: bool) -> str:
+    """ORDER BY for walking the sequence forward, or backward from a point."""
+    dated_desc = (newest_first and forward) or (not newest_first and not forward)
+    d = "DESC" if dated_desc else "ASC"
+    nr = "ASC" if forward else "DESC"
+    return (f" ORDER BY (a.published_at IS NULL) {nr}, a.published_at {d}, "
+            f"a.source_order {d}, a.id {d}")
+
+
 def neighbour(conn, article_id: int, direction: int, scope: str = "all",
-              hide_read: bool = False):
+              hide_read: bool = False, newest_first: bool = False):
     """Next (+1) or previous (-1) article in the current reading order.
 
-    Position is compared, not membership, so this still works when the article
-    you are on has just been marked read and is no longer in the filtered set.
+    With `newest_first`, "next" is the next-older article. Position is
+    compared, not membership, so this still works when the article you are on
+    has just been marked read and is no longer in the filtered set.
     """
     cur = get_article(conn, article_id)
     if cur is None:
         return None
-    return neighbour_of(conn, cur, direction, scope=scope, hide_read=hide_read)
+    return neighbour_of(conn, cur, direction, scope=scope, hide_read=hide_read,
+                        newest_first=newest_first)
 
 
 def neighbour_of(conn, cur, direction: int, scope: str = "all",
-                 hide_read: bool = False):
+                 hide_read: bool = False, newest_first: bool = False):
     """`neighbour()` for a row already in hand, which need not still exist.
 
     Removing a blog deletes the article the reader is sitting on, but the row
@@ -715,27 +757,16 @@ def neighbour_of(conn, cur, direction: int, scope: str = "all",
     that is all this needs to find what came either side of it.
     """
     where, args = _filter_sql(scope, include_disabled=False, hide_read=hide_read)
-    # Build a strict lexicographic comparison on (null-rank, published_at, source_order, id)
-    nullrank = 1 if cur["published_at"] is None else 0
-    pub = cur["published_at"]
-    key = [nullrank, pub, cur["source_order"], cur["id"]]
-    if direction > 0:
-        cmp = ("((a.published_at IS NULL) > ?) OR ((a.published_at IS NULL) = ? AND ("
-               "COALESCE(a.published_at,'') > COALESCE(?,'') OR (COALESCE(a.published_at,'') = COALESCE(?,'') AND ("
-               "a.source_order > ? OR (a.source_order = ? AND a.id > ?)))))")
-        order = ORDER_CHRONO
-    else:
-        cmp = ("((a.published_at IS NULL) < ?) OR ((a.published_at IS NULL) = ? AND ("
-               "COALESCE(a.published_at,'') < COALESCE(?,'') OR (COALESCE(a.published_at,'') = COALESCE(?,'') AND ("
-               "a.source_order < ? OR (a.source_order = ? AND a.id < ?)))))")
-        order = ORDER_CHRONO_DESC
-    q = QUEUE_SELECT + where + f" AND ({cmp})" + order + " LIMIT 1"
-    return conn.execute(q, args + [nullrank, nullrank, pub, pub,
-                                   key[2], key[2], key[3]]).fetchone()
+    forward = direction > 0
+    cmp, cargs = _sequence_cmp(cur, newest_first, after=forward)
+    q = (QUEUE_SELECT + where + f" AND ({cmp})"
+         + _sequence_order(newest_first, forward) + " LIMIT 1")
+    return conn.execute(q, args + cargs).fetchone()
 
 
 def position_in_queue(conn, article_id: int, scope: str = "all",
-                      hide_read: bool = False) -> tuple[int, int]:
+                      hide_read: bool = False,
+                      newest_first: bool = False) -> tuple[int, int]:
     """1-based position of an article in the queue, and the queue total."""
     cur = get_article(conn, article_id)
     where, args = _filter_sql(scope, include_disabled=False, hide_read=hide_read)
@@ -744,15 +775,11 @@ def position_in_queue(conn, article_id: int, scope: str = "all",
         "LEFT JOIN reading_state r ON r.article_id=a.id" + where, args).fetchone()["c"]
     if cur is None:
         return 0, total
-    nullrank = 1 if cur["published_at"] is None else 0
+    cmp, cargs = _sequence_cmp(cur, newest_first, after=False)
     before = conn.execute(
         "SELECT COUNT(*) c FROM articles a JOIN sources s ON s.id=a.source_id "
         "LEFT JOIN reading_state r ON r.article_id=a.id" + where +
-        " AND (((a.published_at IS NULL) < ?) OR ((a.published_at IS NULL) = ? AND ("
-        "COALESCE(a.published_at,'') < COALESCE(?,'') OR (COALESCE(a.published_at,'') = COALESCE(?,'') AND ("
-        "a.source_order < ? OR (a.source_order = ? AND a.id < ?))))))",
-        args + [nullrank, nullrank, cur["published_at"], cur["published_at"],
-                cur["source_order"], cur["source_order"], cur["id"]]).fetchone()["c"]
+        f" AND ({cmp})", args + cargs).fetchone()["c"]
     return before + 1, total
 
 
@@ -821,19 +848,20 @@ def set_scroll(conn, article_id: int, pos: float) -> None:
                  (pos, utcnow(), article_id))
 
 
-def first_unread(conn):
-    rows = queue(conn, scope="unread", limit=1)
+def first_unread(conn, newest_first: bool = False):
+    rows = queue(conn, scope="unread", limit=1, newest_first=newest_first)
     return rows[0] if rows else None
 
 
-def resume_article(conn):
-    """The article to open on launch: the remembered one, else first unread."""
+def resume_article(conn, newest_first: bool = False):
+    """The article to open on launch: the remembered one, else first unread
+    (the newest unread one when reading newest first)."""
     aid = state_get(conn, "current_article_id")
     if aid:
         row = get_article(conn, int(aid))
         if row and row["content_status"] in ("ok", "partial", "paywalled"):
             return row
-    r = first_unread(conn)
+    r = first_unread(conn, newest_first=newest_first)
     return get_article(conn, r["id"]) if r else None
 
 
