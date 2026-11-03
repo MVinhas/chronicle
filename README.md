@@ -163,23 +163,33 @@ guess, which blogs are earning their place in the queue.
 ## Reading a book
 
 Chronicle can read a book you own as well as blogs. In the **Blogs** tab press
-**Add book…** and choose an `.epub` file (or run `chronicle add-book
+the **Add book…** button and choose an `.epub` file (or run `chronicle add-book
 PATH.epub [--name NAME]`). The book is read from your disk, offline: you
 supply the file, and nothing is downloaded from any website.
 
 - It works with any **DRM-free** EPUB. DRM-protected EPUBs are not supported,
   and Chronicle does not remove DRM.
 - Each chapter becomes an article, in the book's own order, titled from its
-  table of contents. Cover, title page, copyright and contents pages are
-  skipped. Images are kept; MathML equations are turned into plain text with
-  superscripts and subscripts (`E = mc`<sup>2</sup>); links between chapters
-  become plain text.
+  table of contents. A book whose contents point to places inside a few big
+  files (Project Gutenberg's do) is cut at those places. Cover, title page,
+  copyright and contents pages are skipped; short pages are judged by what
+  they say as well as what they are called, so a real chapter that happens to
+  be named "Contents" stays. Images are kept; MathML equations are turned
+  into plain text with superscripts and subscripts (`E = mc`<sup>2</sup>);
+  links between chapters become plain text.
 - Chapters have no dates, so they sit after your dated posts, always in order
   from the first chapter to the last, in either reading direction. Two books
   never interleave. Read state, notes and highlights work as for any article.
-- Pressing **Fetch new posts** or **Full archive scan** on a book is cheap: the
-  file is re-read only if it changed. If you move or delete the file, the
-  update says so and the chapters you already have stay in your library.
+- Adding a book copies it into Chronicle's own library folder (`books/` under
+  the data directory), so it keeps working if you move or delete the original
+  and under Flatpak, where the file chooser hands over a temporary path. The
+  book is identified by the path you chose: adding the same path again says
+  it is already in your library. Pressing **Fetch new posts** or **Full
+  archive scan** on a book is cheap: the original is re-read only if its
+  content changed, and then the chapters are updated in place, keeping read
+  state, notes and highlights. Chapters the new file no longer has are
+  removed, unless you annotated or favourited them. If the original has gone
+  the update says it used the stored copy.
 - The file is treated as untrusted: it is read in memory with size limits,
   scripts are never run and external references are never followed.
 

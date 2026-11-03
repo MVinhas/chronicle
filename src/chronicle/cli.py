@@ -59,6 +59,12 @@ def cmd_add_book(args) -> int:
     from . import epubfile
     from .sources import epub as epub_source
     conn = db.get_conn()
+    existing = epub_source.find_book_source(conn, args.path)
+    if existing is not None:
+        print(f"'{existing['name']}' is already in your library as "
+              f"'{existing['slug']}'. Run: chronicle sync --source "
+              f"{existing['slug']} to pick up changes to the file.")
+        return 0
     try:
         row = epub_source.add_book_source(conn, args.path, args.name)
     except epubfile.EpubError as exc:

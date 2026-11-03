@@ -881,6 +881,21 @@ class TestCli(TmpMixin):
         self.assertEqual(row["plugin"], "epub")
         self.assertEqual(row["homepage"], os.path.abspath(self.epub))
 
+    def test_adding_an_existing_book_says_so(self):
+        from chronicle import cli
+        make_epub(self.epub, standard_chapters()[4:])
+        outs = []
+        for _ in range(2):
+            out = io.StringIO()
+            with mock.patch.object(db, "get_conn", return_value=self.conn), \
+                    contextlib.redirect_stdout(out):
+                self.assertEqual(cli.main(["add-book", self.epub]) or 0, 0)
+            outs.append(out.getvalue())
+        self.assertIn("Added", outs[0])
+        self.assertIn("already in your library", outs[1])
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) c FROM sources").fetchone()["c"], 1)
+
     def test_add_book_rejects_a_bad_file(self):
         from chronicle import cli
         Path(self.epub).write_bytes(b"junk")

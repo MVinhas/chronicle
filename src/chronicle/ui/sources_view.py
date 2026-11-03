@@ -85,9 +85,11 @@ class SourcesView(Gtk.Box):
                          css_classes=["flat"])
         add.connect("clicked", lambda *_: self.open_add_dialog())
 
-        book = Gtk.Button(icon_name="x-office-document-symbolic",
-                          tooltip_text="Add a book — an EPUB file you own",
-                          css_classes=["flat"])
+        book = Gtk.Button(
+            child=Adw.ButtonContent(icon_name="x-office-document-symbolic",
+                                    label="Add book…"),
+            tooltip_text="Add a book — a DRM-free EPUB file you own",
+            css_classes=["flat"])
         book.connect("clicked", lambda *_: self.open_book_dialog())
 
         # Two different jobs, so two buttons rather than one that sometimes
@@ -341,8 +343,12 @@ class SourcesView(Gtk.Box):
             file = chooser.open_finish(result)
         except GLib.Error:
             return                                    # dismissed
-        path = file.get_path()
+        path = file.get_path() if file is not None else None
         if not path:
+            # A location with no local path (a remote mount) cannot be read.
+            self.window.toasts.add_toast(Adw.Toast(
+                title="That file is not on this computer, so it cannot be "
+                      "read. Copy it somewhere local first.", timeout=6))
             return
         self.window.toasts.add_toast(Adw.Toast(title="Reading the book…", timeout=3))
         threading.Thread(target=self._add_book, args=(path,), daemon=True).start()
@@ -352,14 +358,24 @@ class SourcesView(Gtk.Box):
         conn = db.connect()
         try:
             db.init(conn)
+            existing = epub_source.find_book_source(conn, path)
+            if existing is not None:
+                GLib.idle_add(self._book_present, existing["name"])
+                return
             row = epub_source.add_book_source(conn, path)
-            name = row["name"]
+            info = {"name": row["name"], "detected": "your EPUB file",
+                    "book_id": row["id"]}
         except Exception as exc:                      # noqa: BLE001
-            GLib.idle_add(self._added, None, str(exc))
+            GLib.idle_add(self._added, None, str(exc), "book")
             return
         finally:
             conn.close()
-        GLib.idle_add(self._added, {"name": name, "detected": "your EPUB file"}, None)
+        GLib.idle_add(self._added, info, None, "book")
+
+    def _book_present(self, name: str) -> bool:
+        self.window.toasts.add_toast(Adw.Toast(
+            title=f"{name} is already in your library", timeout=5))
+        return False
 
     def open_add_dialog(self) -> None:
         dialog = Adw.AlertDialog(
@@ -413,13 +429,21 @@ class SourcesView(Gtk.Box):
             conn.close()
         GLib.idle_add(self._added, spec, None)
 
-    def _added(self, spec, error) -> bool:
+    def _added(self, spec, error, kind: str = "blog") -> bool:
         if error or spec is None:
             self.window.toasts.add_toast(
-                Adw.Toast(title=f"Could not add that blog: {error}", timeout=6))
+                Adw.Toast(title=f"Could not add that {kind}: {error}", timeout=6))
             return False
         self.reload()
         self.emit("library-changed")
+        if kind == "book":
+            # A book is local and quick: read it straight away rather than
+            # asking, and only that book.
+            self.window.toasts.add_toast(Adw.Toast(
+                title=f"Added {spec['name']} — importing its chapters…",
+                timeout=5))
+            self.emit("sync-requested", [spec["book_id"]], True)
+            return False
         title = f"Added {spec['name']} — via {spec['detected']}"
         toast = Adw.Toast(title=title, button_label="Build archive",
                           timeout=12 if spec.get("partial") else 8)
