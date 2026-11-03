@@ -73,18 +73,57 @@ def cache_images_for(conn, article_id: int, html: str, *,
                 if result is None:
                     continue
                 digest, mime, ext, body = result
-                relpath = paths.image_relpath(digest, ext)
-                target = paths.image_path(digest, ext)
-                if not target.exists():
-                    try:
-                        target.write_bytes(body)
-                    except OSError as exc:
-                        log.debug("image write failed %s: %s", url, exc)
-                        continue
-                db.record_image(conn, digest, url, mime, len(body), relpath)
-                mapping[url] = f"{SCHEME}://{relpath}"
+                relpath = _persist(conn, digest, mime, ext, body, url)
+                if relpath:
+                    mapping[url] = f"{SCHEME}://{relpath}"
 
     return htmlutil.rewrite_image_srcs(html, mapping), len(mapping)
+
+
+def _persist(conn, digest: str, mime: str, ext: str, body: bytes,
+             key: str) -> str | None:
+    """Write an image into the content-addressed store; return its relpath."""
+    relpath = paths.image_relpath(digest, ext)
+    target = paths.image_path(digest, ext)
+    if not target.exists():
+        try:
+            target.write_bytes(body)
+        except OSError as exc:
+            log.debug("image write failed %s: %s", key, exc)
+            return None
+    db.record_image(conn, digest, key, mime, len(body), relpath)
+    return relpath
+
+
+def store_assets(html: str, load, conn, prefix: str, key_prefix: str) -> str:
+    """Store images a source supplies itself rather than by URL.
+
+    `load(ref)` returns the bytes for an `<img src>` beginning with `prefix`
+    (an EPUB's own members, say). The same content-addressed store and
+    chronicle-img:// scheme as downloaded images are used, so these work
+    offline and are pruned together. No minimum size applies: a book's
+    inline-equation images are legitimately tiny. An image that cannot be
+    loaded is dropped rather than left pointing nowhere.
+    """
+    soup = htmlutil.parse(html)
+    changed = False
+    for img in soup.find_all("img"):
+        src = img.get("src") or ""
+        if not src.startswith(prefix):
+            continue
+        changed = True
+        body = load(src[len(prefix):])
+        sniffed = _sniff(body, "") if body else None
+        relpath = None
+        if sniffed:
+            mime, ext = sniffed
+            relpath = _persist(conn, hashlib.sha256(body).hexdigest(), mime,
+                               ext, body, key_prefix + src[len(prefix):])
+        if relpath:
+            img["src"] = f"{SCHEME}://{relpath}"
+        else:
+            img.decompose()
+    return soup.decode() if changed else html
 
 
 def _download(url: str):

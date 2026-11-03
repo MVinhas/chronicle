@@ -8,6 +8,7 @@ from .. import net
 from . import discovery
 from .base import Cancelled, Content, Context, Source, Stub
 from .discovery import extract_date
+from .epub import EpubSource
 from .generic import GenericSource
 from .ghost import GhostSource
 from .gwern import GwernSource
@@ -17,7 +18,7 @@ from .wordpress import WordPressSource
 REGISTRY: dict[str, type[Source]] = {
     cls.plugin_id: cls for cls in (
         GwernSource, PaulGrahamSource, WordPressSource, GhostSource,
-        GenericSource,
+        GenericSource, EpubSource,
     )
 }
 

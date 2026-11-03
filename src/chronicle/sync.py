@@ -316,7 +316,10 @@ class Syncer:
                     # 'gone' means the origin 404s; retry it only when this
                     # stub brings a new route (a feed-supplied body).
                     retry_gone = status == "gone" and bool(stub.raw_html)
-                    if status in ("pending", "error") or retry_gone:
+                    # A source can insist its body be taken again (a book
+                    # whose file changed): the stub already carries it.
+                    refresh = bool(stub.extra.get("refresh"))
+                    if status in ("pending", "error") or retry_gone or refresh:
                         pending.append((article_id, stub.url, stub.raw_html,
                                         stub.base_url, stub.extra))
                 if discovered % 25 == 0:
@@ -477,6 +480,12 @@ class Syncer:
                prog: Progress, cache_images: bool) -> None:
         html = content.html or ""
         status = content.status
+        # Material the source ships itself (a book's pictures) is local and
+        # cheap, so it is stored whatever the remote-image setting says.
+        loader = getattr(source, "load_asset", None)
+        if status == "ok" and loader is not None:
+            html = images.store_assets(html, loader, conn, source.ASSET_PREFIX,
+                                       source.asset_key_prefix())
         if status == "ok" and cache_images and not self.should_stop():
             try:
                 html, _ = images.cache_images_for(

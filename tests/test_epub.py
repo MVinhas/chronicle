@@ -1,0 +1,480 @@
+"""Reading a book: EPUB import, safety limits, math, ordering.
+
+EPUBs are generated here with zipfile; nothing touches the network.
+Run: tools/run-tests.sh
+"""
+from __future__ import annotations
+
+import contextlib
+import io
+import os
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+from unittest import mock
+
+from chronicle import db, epubfile, htmlutil, images, mathml, paths, sync
+
+_REAL_CONNECT = db.connect
+PNG = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 4      # over 900 bytes
+TINY_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 40           # below MIN_BYTES
+
+CONTAINER = (
+    '<?xml version="1.0"?><container version="1.0" '
+    'xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles>'
+    '<rootfile full-path="OEBPS/content.opf" '
+    'media-type="application/oebps-package+xml"/></rootfiles></container>')
+
+
+def xhtml(title: str, body: str, attrs: str = "") -> str:
+    return ('<?xml version="1.0" encoding="utf-8"?>'
+            '<html xmlns="http://www.w3.org/1999/xhtml" '
+            'xmlns:epub="http://www.idpf.org/2007/ops"><head>'
+            f'<title>{title}</title></head><body {attrs}>{body}</body></html>')
+
+
+def chapter_body(title: str, words: int = 60) -> str:
+    return f"<h1>{title}</h1><p>{' '.join(['word'] * words)}</p>"
+
+
+def make_epub(path, chapters, toc="nav", images_=None, extra=None,
+              guide=None, opf_extra="", title="The Test Book"):
+    """chapters: list of (id, filename, toc_title|None, body, body_attrs)."""
+    items, spine = [], []
+    for cid, fn, _t, _b, *_ in chapters:
+        items.append(f'<item id="{cid}" href="{fn}" '
+                     'media-type="application/xhtml+xml"/>')
+        spine.append(f'<itemref idref="{cid}"/>')
+    for name in (images_ or {}):
+        items.append(f'<item id="img-{name}" href="{name}" media-type="image/png"/>')
+    if toc == "nav":
+        items.append('<item id="nav" href="nav.xhtml" properties="nav" '
+                     'media-type="application/xhtml+xml"/>')
+    elif toc == "ncx":
+        items.append('<item id="ncx" href="toc.ncx" '
+                     'media-type="application/x-dtbncx+xml"/>')
+    spine_attr = ' toc="ncx"' if toc == "ncx" else ""
+    opf = ('<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" '
+           'version="3.0" unique-identifier="id"><metadata '
+           'xmlns:dc="http://purl.org/dc/elements/1.1/">'
+           f'<dc:title>{title}</dc:title><dc:creator>A. Author</dc:creator>'
+           f'</metadata><manifest>{"".join(items)}</manifest>'
+           f'<spine{spine_attr}>{"".join(spine)}</spine>{guide or ""}'
+           f'{opf_extra}</package>')
+    titled = [(fn, t) for _i, fn, t, *_ in chapters if t]
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("mimetype", "application/epub+zip")
+        z.writestr("META-INF/container.xml", CONTAINER)
+        z.writestr("OEBPS/content.opf", opf)
+        for cid, fn, _t, body, *rest in chapters:
+            z.writestr(f"OEBPS/{fn}", xhtml(_t or cid, body, *(rest or [""])))
+        if toc == "nav":
+            lis = "".join(f'<li><a href="{fn}">{t}</a></li>' for fn, t in titled)
+            z.writestr("OEBPS/nav.xhtml", xhtml(
+                "Nav", f'<nav epub:type="toc"><ol>{lis}</ol></nav>'))
+        elif toc == "ncx":
+            pts = "".join(
+                f'<navPoint id="p{i}" playOrder="{i}"><navLabel><text>{t}</text>'
+                f'</navLabel><content src="{fn}"/></navPoint>'
+                for i, (fn, t) in enumerate(titled, 1))
+            z.writestr("OEBPS/toc.ncx",
+                       '<?xml version="1.0"?><ncx xmlns="http://www.daisy.org/'
+                       f'z3986/2005/ncx/" version="2005-1"><navMap>{pts}</navMap></ncx>')
+        for name, data in (images_ or {}).items():
+            z.writestr(f"OEBPS/{name}", data)
+        for name, data in (extra or {}).items():
+            z.writestr(name, data)
+    return path
+
+
+def standard_chapters():
+    return [
+        ("cover", "cover.xhtml", "Cover", '<img src="cover.png" alt="c"/>'),
+        ("title", "titlepage.xhtml", "Title Page", "<h1>The Test Book</h1>"),
+        ("copy", "copyright.xhtml", "Copyright", "<p>All rights reserved.</p>"),
+        ("toc", "contents.xhtml", "Contents", "<p>1. One 2. Two</p>"),
+        ("c1", "ch1.xhtml", "Chapter One", chapter_body("Chapter One")),
+        ("c2", "ch2.xhtml", "Chapter Two", chapter_body("Chapter Two")),
+        ("c3", "ch3.xhtml", "Chapter Three", chapter_body("Chapter Three")),
+    ]
+
+
+class TmpMixin(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.epub = os.path.join(self.dir.name, "book.epub")
+        self.dbfile = os.path.join(self.dir.name, "lib.db")
+        patches = [
+            mock.patch.object(paths, "IMAGE_DIR", Path(self.dir.name) / "img"),
+            mock.patch.object(db, "connect",
+                              lambda path=None: _REAL_CONNECT(self.dbfile)),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        (Path(self.dir.name) / "img").mkdir()
+        self.conn = _REAL_CONNECT(self.dbfile)
+        db.init(self.conn)
+        self.addCleanup(self.conn.close)
+
+    def add_book(self, name=None):
+        from chronicle.sources import epub as epub_source
+        return epub_source.add_book_source(self.conn, self.epub, name)
+
+    def sync(self, newest_only=False):
+        return sync.Syncer().sync_all(newest_only=newest_only)
+
+    def titles(self, sid=None):
+        q = "SELECT title FROM articles"
+        args = ()
+        if sid:
+            q += " WHERE source_id=?"
+            args = (sid,)
+        return [r["title"] for r in self.conn.execute(
+            q + " ORDER BY source_order", args)]
+
+
+class TestChapters(TmpMixin):
+    def test_epub3_nav_titles_order_and_front_matter(self):
+        make_epub(self.epub, standard_chapters(), images_={"cover.png": PNG})
+        sid = self.add_book()["id"]
+        self.sync()
+        self.assertEqual(self.titles(sid),
+                         ["Chapter One", "Chapter Two", "Chapter Three"])
+        orders = [r["source_order"] for r in self.conn.execute(
+            "SELECT source_order FROM articles ORDER BY source_order")]
+        self.assertEqual(orders, sorted(orders))
+        self.assertEqual(len(set(orders)), 3)
+        row = self.conn.execute("SELECT * FROM articles LIMIT 1").fetchone()
+        self.assertIsNone(row["published_at"])
+        self.assertEqual(row["content_status"], "ok")
+
+    def test_epub2_ncx(self):
+        make_epub(self.epub, standard_chapters(), toc="ncx",
+                  images_={"cover.png": PNG})
+        sid = self.add_book()["id"]
+        self.sync()
+        self.assertEqual(self.titles(sid),
+                         ["Chapter One", "Chapter Two", "Chapter Three"])
+
+    def test_spine_only_uses_headings(self):
+        chs = [(c, f, None, b) for c, f, _t, b in standard_chapters()[4:]]
+        make_epub(self.epub, chs, toc=None)
+        sid = self.add_book()["id"]
+        self.sync()
+        self.assertEqual(self.titles(sid),
+                         ["Chapter One", "Chapter Two", "Chapter Three"])
+
+    def test_epub_type_and_guide_mark_front_matter(self):
+        chs = [("a", "a.xhtml", "Preamble", "<p>" + "w " * 50 + "</p>",
+                'epub:type="frontmatter copyright-page"'),
+               ("b", "b.xhtml", "Real", chapter_body("Real"))]
+        make_epub(self.epub, chs)
+        book = epubfile.open_book(self.epub)
+        self.assertEqual([c.title for c in book.chapters], ["Real"])
+
+    def test_unlisted_spine_file_continues_previous_chapter(self):
+        chs = [("c1", "ch1.xhtml", "One", chapter_body("One")),
+               ("c1b", "ch1b.xhtml", None, "<p>second half marker</p>"),
+               ("c2", "ch2.xhtml", "Two", chapter_body("Two"))]
+        make_epub(self.epub, chs)
+        book = epubfile.open_book(self.epub)
+        self.assertEqual([c.title for c in book.chapters], ["One", "Two"])
+        self.assertIn("second half marker", book.chapters[0].html)
+
+    def test_scripts_and_handlers_never_survive(self):
+        body = ('<h1>T</h1><p onclick="x()">hello ' + "w " * 30 +
+                '</p><script>alert(1)</script><iframe src="http://e"></iframe>')
+        make_epub(self.epub, [("c", "c.xhtml", "T", body)])
+        self.add_book()
+        self.sync()
+        html = self.conn.execute("SELECT content_html h FROM articles").fetchone()["h"]
+        self.assertNotIn("script", html.lower())
+        self.assertNotIn("onclick", html)
+        self.assertNotIn("iframe", html)
+
+    def test_internal_links_degrade_to_text_external_stay(self):
+        body = ('<h1>T</h1><p>See <a href="ch2.xhtml#x">chapter two</a> and '
+                '<a href="https://example.org/">site</a> ' + "w " * 30 + "</p>")
+        make_epub(self.epub, [("c", "c.xhtml", "T", body),
+                              ("d", "ch2.xhtml", "D", chapter_body("D"))])
+        book = epubfile.open_book(self.epub)
+        html = book.chapters[0].html
+        self.assertIn("chapter two", html)
+        self.assertNotIn("ch2.xhtml", html)
+        self.assertIn("https://example.org/", html)
+
+
+class TestSafety(TmpMixin):
+    def test_zip_slip_member_rejected(self):
+        make_epub(self.epub, standard_chapters()[4:],
+                  extra={"../../evil.txt": "x"})
+        with self.assertRaises(epubfile.EpubError):
+            epubfile.open_book(self.epub)
+
+    def test_absolute_member_rejected(self):
+        make_epub(self.epub, standard_chapters()[4:], extra={"/etc/x": "x"})
+        with self.assertRaises(epubfile.EpubError):
+            epubfile.open_book(self.epub)
+
+    def test_oversized_entry_rejected(self):
+        make_epub(self.epub, standard_chapters()[4:],
+                  extra={"OEBPS/big.bin": b"\x00" * 2_000_000})
+        with mock.patch.object(epubfile, "MAX_ENTRY_BYTES", 100_000):
+            with self.assertRaises(epubfile.EpubError):
+                epubfile.open_book(self.epub)
+
+    def test_too_many_entries_rejected(self):
+        make_epub(self.epub, standard_chapters()[4:],
+                  extra={f"OEBPS/f{i}.txt": "x" for i in range(50)})
+        with mock.patch.object(epubfile, "MAX_ENTRIES", 20):
+            with self.assertRaises(epubfile.EpubError):
+                epubfile.open_book(self.epub)
+
+    def test_compression_bomb_ratio_rejected(self):
+        make_epub(self.epub, standard_chapters()[4:],
+                  extra={"OEBPS/bomb.txt": b"\x00" * 5_000_000})
+        with mock.patch.object(epubfile, "MAX_RATIO", 50), \
+                mock.patch.object(epubfile, "RATIO_FLOOR", 100_000):
+            with self.assertRaises(epubfile.EpubError):
+                epubfile.open_book(self.epub)
+
+    def test_total_size_cap(self):
+        make_epub(self.epub, standard_chapters()[4:],
+                  extra={"OEBPS/a.bin": b"a" * 60_000, "OEBPS/b.bin": b"b" * 60_000})
+        with mock.patch.object(epubfile, "MAX_TOTAL_BYTES", 100_000):
+            with self.assertRaises(epubfile.EpubError):
+                epubfile.open_book(self.epub)
+
+    def test_entity_declaration_in_package_rejected(self):
+        evil = ('<?xml version="1.0"?><!DOCTYPE p [<!ENTITY xxe SYSTEM '
+                '"file:///etc/passwd">]><package xmlns="http://www.idpf.org/2007/opf">'
+                '<metadata/><manifest/><spine/></package>')
+        make_epub(self.epub, standard_chapters()[4:],
+                  extra={"OEBPS/content.opf": evil})
+        # writestr of a duplicate name keeps the later one first in the index;
+        # build the archive directly instead for a deterministic override.
+        with zipfile.ZipFile(self.epub, "w") as z:
+            z.writestr("META-INF/container.xml", CONTAINER)
+            z.writestr("OEBPS/content.opf", evil)
+        with self.assertRaises(epubfile.EpubError):
+            epubfile.open_book(self.epub)
+
+    def test_external_entity_in_chapter_is_not_resolved(self):
+        body = ('<!DOCTYPE x [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+                '<h1>T</h1><p>before &xxe; after ' + "w " * 30 + '</p>')
+        make_epub(self.epub, [("c", "c.xhtml", "T", body)])
+        book = epubfile.open_book(self.epub)
+        self.assertNotIn("root:", book.chapters[0].html)
+
+    def test_drm_encrypted_book_rejected(self):
+        enc = ('<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+               '<EncryptedData xmlns="http://www.w3.org/2001/04/xmlenc#">'
+               '<EncryptionMethod Algorithm="http://www.w3.org/2001/04/xmlenc#aes128-cbc"/>'
+               '<CipherData><CipherReference URI="OEBPS/c.xhtml"/></CipherData>'
+               '</EncryptedData></encryption>')
+        make_epub(self.epub, standard_chapters()[4:],
+                  extra={"META-INF/encryption.xml": enc})
+        with self.assertRaisesRegex(epubfile.EpubError, "DRM"):
+            epubfile.open_book(self.epub)
+
+    def test_font_obfuscation_is_not_drm(self):
+        enc = ('<encryption xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+               '<EncryptedData xmlns="http://www.w3.org/2001/04/xmlenc#">'
+               '<EncryptionMethod Algorithm="http://www.idpf.org/2008/embedding"/>'
+               '<CipherData><CipherReference URI="OEBPS/f.otf"/></CipherData>'
+               '</EncryptedData></encryption>')
+        make_epub(self.epub, standard_chapters()[4:],
+                  extra={"META-INF/encryption.xml": enc})
+        self.assertEqual(len(epubfile.open_book(self.epub).chapters), 3)
+
+    def test_not_a_zip(self):
+        Path(self.epub).write_bytes(b"not a zip at all")
+        with self.assertRaises(epubfile.EpubError):
+            epubfile.open_book(self.epub)
+
+
+class TestImages(TmpMixin):
+    def test_images_are_extracted_and_cached_locally(self):
+        body = (chapter_body("One") + '<p><img src="fig/a.png" alt="fig"/></p>'
+                '<p><img src="fig/tiny.png" alt="eq"/></p>'
+                '<p><img src="../../escape.png" alt="x"/></p>'
+                '<p><img src="http://remote.example/x.png" alt="r"/></p>')
+        make_epub(self.epub, [("c", "c.xhtml", "One", body)],
+                  images_={"fig/a.png": PNG, "fig/tiny.png": TINY_PNG})
+        self.add_book()
+        self.sync()
+        html = self.conn.execute("SELECT content_html h FROM articles").fetchone()["h"]
+        srcs = htmlutil.image_urls(html)
+        local = [s for s in srcs if s.startswith(images.SCHEME + "://")]
+        self.assertEqual(len(local), 2, srcs)       # math-sized image kept
+        for s in local:
+            self.assertIsNotNone(images.resolve(s.split("://", 1)[1]))
+        self.assertFalse([s for s in srcs if "escape" in s])
+
+    def test_images_are_cached_even_when_remote_caching_is_off(self):
+        body = chapter_body("One") + '<img src="a.png" alt=""/>'
+        make_epub(self.epub, [("c", "c.xhtml", "One", body)],
+                  images_={"a.png": PNG})
+        self.add_book()
+        sync.Syncer().sync_all(cache_images=False)
+        html = self.conn.execute("SELECT content_html h FROM articles").fetchone()["h"]
+        self.assertIn(images.SCHEME + "://", html)
+
+
+class TestMath(unittest.TestCase):
+    def conv(self, mathml_src: str) -> str:
+        soup = htmlutil.parse(mathml_src)
+        return mathml.to_html(soup.find("math"))
+
+    def test_superscript_and_subscript(self):
+        self.assertEqual(self.conv(
+            "<math><msup><mi>x</mi><mn>2</mn></msup></math>"),
+            "<i>x</i><sup>2</sup>")
+        self.assertEqual(self.conv(
+            "<math><msub><mi>a</mi><mn>0</mn></msub></math>"),
+            "<i>a</i><sub>0</sub>")
+
+    def test_fraction_sqrt_and_operators(self):
+        out = self.conv("<math><mfrac><mn>1</mn><mn>2</mn></mfrac></math>")
+        self.assertEqual(out, "1/2")
+        out = self.conv("<math><msqrt><mi>x</mi></msqrt></math>")
+        self.assertIn("√", out)
+        out = self.conv("<math><mrow><mi>E</mi><mo>=</mo><mi>m</mi>"
+                        "<msup><mi>c</mi><mn>2</mn></msup></mrow></math>")
+        self.assertEqual(out, "<i>E</i> = <i>m</i><i>c</i><sup>2</sup>")
+
+    def test_compound_fraction_is_parenthesised(self):
+        out = self.conv("<math><mfrac><mrow><mi>a</mi><mo>+</mo><mi>b</mi></mrow>"
+                        "<mn>2</mn></mfrac></math>")
+        self.assertEqual(out, "(<i>a</i> + <i>b</i>)/2")
+
+    def test_vector_accent_and_text_are_escaped(self):
+        out = self.conv("<math><mover><mi>F</mi><mo>→</mo></mover></math>")
+        self.assertTrue(out.endswith("\u20d7"), out)
+        out = self.conv("<math><mtext>a &lt; b</mtext></math>")
+        self.assertEqual(out, "a &lt; b")
+
+    def test_math_inside_a_chapter_becomes_text(self):
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "m.epub")
+        body = ('<h1>M</h1><p>Energy ' + "w " * 30 + '<math xmlns="http://www.w3.org/'
+                '1998/Math/MathML"><msup><mi>x</mi><mn>2</mn></msup></math> ok.</p>'
+                '<p><img src="eq.png" alt="eq"/></p>')
+        make_epub(path, [("c", "c.xhtml", "M", body)], images_={"eq.png": PNG})
+        html = epubfile.open_book(path).chapters[0].html
+        self.assertIn("<i>x</i><sup>2</sup>", html)
+        self.assertNotIn("<math", html)
+        self.assertIn("<img", html)
+
+
+class TestResync(TmpMixin):
+    def test_unchanged_file_is_not_reread(self):
+        make_epub(self.epub, standard_chapters()[4:])
+        self.add_book()
+        self.sync()
+        with mock.patch.object(epubfile, "open_book",
+                               side_effect=AssertionError("re-read")):
+            self.sync()
+            self.sync(newest_only=True)
+        msg = self.conn.execute("SELECT last_sync_message m FROM sources"
+                                ).fetchone()["m"]
+        self.assertIn("unchanged", msg)
+        self.assertEqual(len(self.titles()), 3)
+
+    def test_changed_file_is_reimported_in_place(self):
+        make_epub(self.epub, standard_chapters()[4:])
+        self.add_book()
+        self.sync()
+        first = [r["id"] for r in self.conn.execute(
+            "SELECT id FROM articles ORDER BY source_order")]
+        chs = standard_chapters()[4:]
+        chs[0] = ("c1", "ch1.xhtml", "Chapter One",
+                  "<h1>Chapter One</h1><p>" + "revised " * 40 + "</p>")
+        make_epub(self.epub, chs)
+        self.sync()
+        rows = self.conn.execute(
+            "SELECT id, content_html h FROM articles ORDER BY source_order").fetchall()
+        self.assertEqual([r["id"] for r in rows], first)      # state preserved
+        self.assertIn("revised", rows[0]["h"])
+
+    def test_missing_file_reports_clearly_and_keeps_library(self):
+        make_epub(self.epub, standard_chapters()[4:])
+        self.add_book()
+        self.sync()
+        os.unlink(self.epub)
+        self.sync()
+        src = self.conn.execute("SELECT * FROM sources").fetchone()
+        self.assertEqual(src["last_sync_status"], "error")
+        self.assertIn("not found", src["last_sync_message"])
+        self.assertEqual(len(self.titles()), 3)
+        n = self.conn.execute(
+            "SELECT COUNT(*) c FROM articles WHERE content_status='ok'"
+        ).fetchone()["c"]
+        self.assertEqual(n, 3)
+
+    def test_adding_the_same_file_twice_returns_the_same_source(self):
+        make_epub(self.epub, standard_chapters()[4:])
+        a = self.add_book()
+        b = self.add_book()
+        self.assertEqual(a["id"], b["id"])
+        self.assertEqual(a["name"], "The Test Book")
+        self.assertEqual(self.add_book("Other")["id"], a["id"])
+
+
+class TestOrdering(TmpMixin):
+    def test_book_is_contiguous_beside_blog_and_second_undated_source(self):
+        make_epub(self.epub, standard_chapters()[4:], title="Book A")
+        a = self.add_book()
+        other = os.path.join(self.dir.name, "b.epub")
+        make_epub(other, [("x1", "x1.xhtml", "Other 1", chapter_body("Other 1")),
+                          ("x2", "x2.xhtml", "Other 2", chapter_body("Other 2"))],
+                  title="Book B")
+        from chronicle.sources import epub as epub_source
+        b = epub_source.add_book_source(self.conn, other, None)
+        blog = db.add_source(self.conn, "blog", "Blog", "generic", "https://b")
+        aid, _ = db.upsert_article(
+            self.conn, blog, "g", url="https://b/1", title="Dated",
+            published_at="2020-01-01T00:00:00", date_precision="day",
+            date_confidence="exact", date_source="t", source_order=0)
+        self.conn.execute("UPDATE articles SET content_status='ok', "
+                          "content_html='<p>x</p>' WHERE id=?", (aid,))
+        sync.Syncer().sync_all(source_ids=[a["id"], b["id"]])   # never the blog
+        want = ["Dated", "Chapter One", "Chapter Two", "Chapter Three",
+                "Other 1", "Other 2"]
+        for newest in (False, True):
+            rows = db.queue(self.conn, newest_first=newest)
+            self.assertEqual([r["title"] for r in rows], want, newest)
+        self.assertLess(a["id"], b["id"])
+
+
+class TestCli(TmpMixin):
+    def test_add_book_command(self):
+        from chronicle import cli
+        make_epub(self.epub, standard_chapters()[4:])
+        out = io.StringIO()
+        with mock.patch.object(db, "get_conn", return_value=self.conn), \
+                contextlib.redirect_stdout(out):
+            rc = cli.main(["add-book", self.epub, "--name", "My Book"])
+        self.assertEqual(rc or 0, 0)
+        row = self.conn.execute("SELECT * FROM sources").fetchone()
+        self.assertEqual(row["name"], "My Book")
+        self.assertEqual(row["plugin"], "epub")
+        self.assertEqual(row["homepage"], os.path.abspath(self.epub))
+
+    def test_add_book_rejects_a_bad_file(self):
+        from chronicle import cli
+        Path(self.epub).write_bytes(b"junk")
+        err = io.StringIO()
+        with mock.patch.object(db, "get_conn", return_value=self.conn), \
+                contextlib.redirect_stderr(err):
+            rc = cli.main(["add-book", self.epub])
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) c FROM sources").fetchone()["c"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

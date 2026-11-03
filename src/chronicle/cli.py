@@ -55,6 +55,20 @@ def cmd_add(args) -> int:
     return 0
 
 
+def cmd_add_book(args) -> int:
+    from . import epubfile
+    from .sources import epub as epub_source
+    conn = db.get_conn()
+    try:
+        row = epub_source.add_book_source(conn, args.path, args.name)
+    except epubfile.EpubError as exc:
+        print(f"Cannot add this book: {exc}", file=sys.stderr)
+        return 1
+    print(f"Added '{row['name']}' as '{row['slug']}' (id {row['id']}). "
+          f"Run: chronicle sync --source {row['slug']}")
+    return 0
+
+
 def cmd_remove(args) -> int:
     conn = db.get_conn()
     row = conn.execute("SELECT * FROM sources WHERE slug=?", (args.slug,)).fetchone()
@@ -225,6 +239,10 @@ def build_parser() -> argparse.ArgumentParser:
     a = sub.add_parser("add", help="follow a new blog")
     a.add_argument("url"); a.add_argument("--slug")
     a.set_defaults(fn=cmd_add)
+
+    ab = sub.add_parser("add-book", help="read a DRM-free EPUB file you own")
+    ab.add_argument("path"); ab.add_argument("--name")
+    ab.set_defaults(fn=cmd_add_book)
 
     r = sub.add_parser("remove", help="stop following a blog")
     r.add_argument("slug"); r.add_argument("--yes", action="store_true")
