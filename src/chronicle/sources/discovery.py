@@ -61,9 +61,9 @@ _DATE_ARCHIVE_RE = re.compile(r"^/\d{4}(/\d{1,2})?(/\d{1,2})?/?$")
 
 # Sitemap-index children that cannot contain posts.
 _SITEMAP_CHILD_SKIP = re.compile(
-    r"(image|video|news|category|categories|tag|author|term|user|product|"
+    r"(image|video|news|category|categories|tag|authors?|term|user|product|"
     r"attachment|misc|local)[-_]?sitemap|sitemap[-_]?(image|video|category|"
-    r"tag|author|misc|pt-)|[-_](category|tag|author|attachment|product)[-_]?\d*\.xml",
+    r"tag|authors?|misc|pt-)|[-_](category|tag|author|attachment|product)[-_]?\d*\.xml",
     re.I)
 
 
@@ -187,7 +187,8 @@ def find_feed_url(base: str, homepage_html: str | None, config: dict,
     # An empty stored hint means "looked for one before, there is none" —
     # recorded so every sync does not re-probe eight conventional paths.
     if "feed" in config:
-        return config["feed"] or None
+        # A recipe may pin a site-relative path ("/rss.xml").
+        return net.absolutise(base + "/", config["feed"]) if config["feed"] else None
     if homepage_html:
         soup = htmlutil.parse(homepage_html)
         link = soup.find("link", attrs={"type": re.compile(
@@ -723,7 +724,13 @@ def _iter_ld(data):
         yield data
         for key in ("@graph", "mainEntity", "itemListElement"):
             if key in data:
-                yield from _iter_ld(data[key])
+                value = data[key]
+                # Some generators key @graph by index ({"1": {...}, "2": ...})
+                # rather than listing it.
+                if key == "@graph" and isinstance(value, dict) \
+                        and not value.get("@type"):
+                    value = list(value.values())
+                yield from _iter_ld(value)
 
 
 # --------------------------------------------------------------------------
