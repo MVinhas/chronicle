@@ -206,8 +206,8 @@ entries doesn't become a long download you never asked for. Books are always
 imported whole, and blogs added before this option existed keep their whole
 archive.
 
-Change it per blog with **Limit…** in the Blogs list (pick a number, or
-**All posts**), or from the command line:
+Change it per blog with the **Limit…** button on its row in the Blogs list (pick
+a number, or switch on **All posts**), or from the command line:
 
 ```sh
 chronicle add https://example.com --limit 200     # or --limit all
@@ -249,9 +249,17 @@ wrong dates,
 [open an issue](https://github.com/MVinhas/chronicle/issues/new?labels=adapter-request)
 with the address and what looks wrong.
 
-Pasting an address with a path (`fs.blog/blog/`) no longer hides a site's own
-API: Chronicle checks the site root for WordPress or Ghost first. Works in
-Progress ships as a built-in recipe.
+Pasting an address with a path is read two ways. A conventional "everything I
+publish" path (`fs.blog/blog/`, `/archive/`, `/posts/` and the like) still finds
+the site's own WordPress or Ghost API at the root. Any other path
+(`/category/essays/`, `/labs/robotics/`) is a section: Chronicle follows just
+that section, named after it, and only uses an API that belongs to the section
+itself (a WordPress multisite subsite). Works in Progress ships as a built-in
+recipe.
+
+Chronicle is polite: requests to a site are spaced out, and if its `robots.txt`
+asks for a `Crawl-delay` (up to 30 seconds) that spacing is honoured, even on a
+first build.
 
 ## Building it yourself
 
