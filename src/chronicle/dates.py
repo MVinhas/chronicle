@@ -142,8 +142,8 @@ def parse_rfc822(text: str, *, confidence: str = "exact", source: str = "") -> P
 
 
 _MONTH_YEAR_RE = re.compile(rf"\b({MONTH_RE})\s+(\d{{4}})\b", re.I)
-_DAY_MONTH_YEAR_RE = re.compile(rf"\b(\d{{1,2}})\s+({MONTH_RE})\w*,?\s+(\d{{4}})\b", re.I)
-_MONTH_DAY_YEAR_RE = re.compile(rf"\b({MONTH_RE})\w*\s+(\d{{1,2}})(?:st|nd|rd|th)?,\s*(\d{{4}})\b", re.I)
+_DAY_MONTH_YEAR_RE = re.compile(rf"\b(\d{{1,2}})\s+({MONTH_RE})\b\.?,?\s+(\d{{4}})\b", re.I)
+_MONTH_DAY_YEAR_RE = re.compile(rf"\b({MONTH_RE})\b\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?,\s*(\d{{4}})\b", re.I)
 
 
 def parse_freeform(text: str, *, confidence: str = "medium", source: str = "") -> PubDate:

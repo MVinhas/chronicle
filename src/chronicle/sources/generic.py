@@ -221,7 +221,10 @@ class GenericSource(Source):
         date = page_date if discovery._rank(page_date) > discovery._rank(cand.date) \
             else cand.date
 
-        if not date.known and not self._is_article(cand, soup):
+        # A date read off unmarked text ('inferred') is a hint about when, not
+        # proof that this is a post: a /meetups/ page can say "Last updated".
+        if ((not date.known or date.confidence == "inferred")
+                and not self._is_article(cand, soup)):
             ctx.reject(cand.guid)
             return None
 

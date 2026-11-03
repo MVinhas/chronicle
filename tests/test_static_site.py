@@ -272,6 +272,13 @@ class TestFeedItemHygiene(unittest.TestCase):
         self.assertTrue(d.iso.startswith("2019-09-17"))
         self.assertEqual(d.source, "text:timestamp")
         self.assertEqual(d.confidence, "inferred")
+        # Only near the headline: not in a footer, not a "last updated".
+        for body in ("<h1>T</h1><p>" + PARA + "</p><footer>17 Sep 2019 / 00:54</footer>",
+                     "<h1>T</h1><p>Last updated 17 Sep 2019 / 00:54</p>",
+                     "<h1>T</h1><p>1 Mayfair 2019 / 10:30</p>"):
+            soup = htmlutil.parse(f"<html><body>{body}</body></html>")
+            self.assertFalse(discovery.extract_date(
+                soup, "https://x.example/t/").known, body)
         # A bare date in prose is not a timestamp.
         soup = htmlutil.parse("<html><body><p>On 17 Sep 2019 we left.</p></body></html>")
         self.assertFalse(discovery.extract_date(soup, "https://x.example/t/").known)

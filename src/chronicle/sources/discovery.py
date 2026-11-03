@@ -818,10 +818,8 @@ def extract_date(soup, url: str) -> dates.PubDate:
     # A clear "17 Sep 2019 / 00:54" timestamp near the top of a hand-built
     # page is the only date some blogs ever print. Weak ('inferred'): the
     # pattern is unmarked, so nothing here may outrank a real signal.
-    body = soup.body or soup
-    head_text = body.get_text(" ", strip=True)[:600]
-    m = _TEXT_TIMESTAMP_RE.search(head_text)
-    if m:
+    m = _TEXT_TIMESTAMP_RE.search(_top_of_article_text(soup))
+    if m and not _UPDATED_RE.search(m.string[max(0, m.start() - 24):m.start()]):
         d = dates.parse_freeform(m.group(1), confidence="inferred",
                                  source="text:timestamp")
         if d.known and d.precision == "day":
@@ -829,8 +827,30 @@ def extract_date(soup, url: str) -> dates.PubDate:
     return dates.UNKNOWN
 
 
+_UPDATED_RE = re.compile(r"updat|modif|edit|revis", re.I)
+
+
+def _top_of_article_text(soup) -> str:
+    """The first stretch of text after the headline, outside navigation,
+    footers, asides, quotes and comments -- where a dateline is, and the
+    only place an unmarked timestamp is trusted."""
+    skip = ("nav", "aside", "footer", "blockquote", "script", "style", "form")
+    h1 = soup.find("h1")
+    if h1 is not None and h1.find_parent(skip[:3]) is None:
+        strings = h1.find_all_next(string=True, limit=30)
+    else:
+        node = htmlutil.extract_main(soup, [])
+        strings = node.find_all(string=True, limit=30) if node is not None else []
+    out = []
+    for s in strings:
+        if s.find_parent(skip) is not None:
+            continue
+        out.append(str(s).strip())
+    return " ".join(t for t in out if t)[:300]
+
+
 _TEXT_TIMESTAMP_RE = re.compile(
-    rf"\b(\d{{1,2}}\s+(?:{dates.MONTH_RE})\w*\s+\d{{4}})\s*[/|,·]\s*\d{{1,2}}:\d{{2}}\b",
+    rf"\b(\d{{1,2}}\s+(?:{dates.MONTH_RE})\b\.?\s+\d{{4}})\s*[/|,·]\s*\d{{1,2}}:\d{{2}}\b",
     re.I)
 
 

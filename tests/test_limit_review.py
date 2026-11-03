@@ -362,6 +362,28 @@ class TestHintExpiry(SyncHarness):
         self.assertNotEqual(self._cfg()["hints_checked"], "2020-01-01")
 
 
+class TestInferredDateIsNotProofOfAnArticle(SyncHarness):
+    def test_a_listing_page_with_a_timestamp_is_not_an_article(self):
+        from fakesite import PARA
+        fn = FakeNet()
+        fn.add(BASE + "/", '<html><head><title>B</title></head><body>'
+               '<a href="/meetups/">Talks</a>' + "".join(
+                   f'<a href="/post-{i}/">Post {i}</a>' for i in range(8))
+               + "</body></html>")
+        for i in range(8):
+            fn.add(f"{BASE}/post-{i}/",
+                   "<html><head><title>P</title></head><body><article><h1>P</h1>"
+                   f"<p>{i + 1} Sep 2019 / 10:30</p><p>{PARA}</p><p>{PARA}</p>"
+                   "</article></body></html>")
+        fn.add(BASE + "/meetups/", "<html><head><title>Talks</title></head><body>"
+               "<ul><li>Last updated 5 Jan 2021, 10:30</li><li>Old one</li></ul>"
+               "</body></html>")
+        run_sync(fn, self.dbfile, spec=_SPEC)
+        urls = {r["url"] for r in self.urls()}
+        self.assertNotIn(f"{BASE}/meetups/", urls)
+        self.assertEqual(len(urls), 8)
+
+
 class TestShortFeedPosts(SyncHarness):
     def _feed(self, fn, link, words):
         fn.add(BASE + "/feed/", _rss([dict(
