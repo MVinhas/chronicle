@@ -5,7 +5,7 @@ import json
 import logging
 from unittest import mock
 
-from chronicle import db, sources, sync
+from chronicle import db, net, sources, sync
 from chronicle.sources import detect, discovery
 
 from fakesite import FakeNet, listing_html, post_html, rss_xml
@@ -416,3 +416,75 @@ class TestShortFeedPosts(SyncHarness):
         words = c.execute("SELECT word_count w FROM articles").fetchone()["w"]
         c.close()
         self.assertGreater(words, 100)
+
+
+class TestDetectEconomy(SyncHarness):
+    def setUp(self):
+        super().setUp()
+        net.reset_crawl_delays()
+
+    def test_the_homepage_is_fetched_once(self):
+        fn = FakeNet()
+        fn.add(BASE + "/", "<html><head><title>Plain</title></head></html>")
+        with fn.patched():
+            detect(BASE + "/")
+        home = [u for u in fn.requests if u.rstrip("/") == BASE]
+        self.assertEqual(len(home), 1, fn.requests)
+
+    def test_detect_honours_crawl_delay(self):
+        fn = FakeNet()
+        fn.add(BASE + "/", "<html><head><title>Plain</title></head></html>")
+        fn.add(BASE + "/robots.txt", "User-agent: *\nCrawl-delay: 9\n")
+        with fn.patched():
+            detect(BASE + "/")
+        self.assertEqual(net._limiter.gap("blog.example"), 9.0)
+
+    def test_detect_records_that_there_is_no_sitemap(self):
+        fn = FakeNet()
+        fn.add(BASE + "/", "<html><head><title>Plain</title></head></html>")
+        with fn.patched():
+            spec = detect(BASE + "/")
+        self.assertEqual(spec["config"].get("sitemap"), "")
+        self.assertTrue(spec["config"].get("hints_checked"))
+
+    def test_a_transient_failure_is_not_recorded_as_absence(self):
+        fn = FakeNet()
+        fn.add(BASE + "/", "<html><head><title>Plain</title></head></html>")
+        fn.add(BASE + "/sitemap.xml", "x", status=503)
+        with fn.patched():
+            spec = detect(BASE + "/")
+        self.assertNotIn("sitemap", spec["config"])
+
+
+class TestStaticPaging(SyncHarness):
+    def test_static_second_pages_are_not_refetched_every_sync(self):
+        fn = FakeNet()
+        links = "".join(f'<a href="/post-{i}/">Post {i}</a>' for i in range(12))
+        fn.add(BASE + "/", f'<html><head><title>B</title></head><body>{links}'
+               "</body></html>")
+        for i in range(12):
+            fn.add(f"{BASE}/post-{i}/", post_html(f"P{i}", f"2026-0{1 + i % 9}-10T00:00:00+00:00"))
+        # Both paging conventions answer with page 1's links again.
+        fn.add(BASE + "/page/2/", fn.pages[BASE + "/"][1].decode())
+        run_sync(fn, self.dbfile, spec=_SPEC)
+        first = fn.count("/page/2") + fn.count("paged=2")
+        self.assertGreater(first, 0)
+        fn.requests.clear()
+        run_sync(fn, self.dbfile, spec=_SPEC)
+        self.assertEqual(fn.count("/page/2") + fn.count("paged=2"), 0)
+
+    def test_junk_feed_items_do_not_count_toward_the_limit(self):
+        from fakesite import PARA
+        fn = FakeNet()
+        _home(fn)
+        items = [dict(title="home", link=BASE + "/", html=PARA,
+                      date="Thu, 20 Sep 2026 00:00:00 GMT") for _ in range(1)]
+        items += [dict(title="ep", link=f"{BASE}/audio/{i}.mp3", html=PARA,
+                       date="Thu, 19 Sep 2026 00:00:00 GMT") for i in range(4)]
+        items += [dict(title=f"P{i}", link=f"{BASE}/p-{i}/", html=PARA * 2,
+                       date=f"Thu, {10 + i} Sep 2026 00:00:00 GMT")
+                  for i in range(6)]
+        fn.add(BASE + "/feed/", _rss(items))
+        spec = dict(_SPEC, config={"limit": 5})
+        run_sync(fn, self.dbfile, spec=spec)
+        self.assertEqual(len(self.urls()), 5)

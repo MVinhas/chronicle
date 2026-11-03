@@ -128,7 +128,8 @@ def detect(url: str) -> dict:
     # is not what any recipe is keyed on. Re-run detection against the site
     # the feed says it belongs to, keeping the feed as a config hint: it is
     # sometimes the only reachable route into a Cloudflare-blocked origin.
-    home_link = _feed_home_link(url)
+    net.apply_crawl_delay(url)          # a Crawl-delay binds detection too
+    home_link, pasted = _feed_home_link(url)
     if home_link and urlparse(home_link).netloc.lower() != urlparse(url).netloc.lower():
         result = detect(home_link)
         result.setdefault("config", {}).setdefault("feed", url)
@@ -150,7 +151,10 @@ def detect(url: str) -> dict:
     home_html: str | None = None
     home_dead = False
     try:
-        home_html = net.fetch_text(base, timeout=25, retries=2)
+        if pasted is not None and not parsed.path.strip("/") and not parsed.query:
+            home_html = pasted.text()       # the page already fetched above
+        else:
+            home_html = net.fetch_text(base, timeout=25, retries=2)
     except net.FetchError as exc:
         # `status is None` means the request never got a response at all --
         # DNS failure or connection refused. A 403/404 is a live site being
@@ -246,7 +250,13 @@ def detect(url: str) -> dict:
     # 4. No API. The generic source merges every remaining route — sitemap,
     #    archive pages, feed — so detection just records where a sitemap is
     #    (robots.txt first, then convention) to save the first sync a probe.
-    sitemap = _find_sitemap(base)
+    sitemap, absent = _find_sitemap(base)
+    if absent:
+        # Every probe said 404: remember it, so the first sync skips them.
+        # (A timeout or 5xx proves nothing, and records nothing.)
+        from datetime import date
+        config["sitemap"] = ""
+        config["hints_checked"] = date.today().isoformat()
     if sitemap:
         config["sitemap"] = sitemap
         return {"plugin": "generic", "name": name, "homepage": base,
@@ -308,9 +318,13 @@ def _feed_link_from(base: str, html: str | None) -> str | None:
     return None
 
 
-def _find_sitemap(base: str) -> str | None:
-    """Where the site's sitemap lives, if anywhere — existence check only."""
+def _find_sitemap(base: str) -> tuple[str | None, bool]:
+    """Where the site's sitemap lives, if anywhere — existence check only.
+
+    Returns (hint, absent): `absent` is True only when every candidate gave a
+    definite 404/410 (or a page that is not a sitemap)."""
     hints = discovery.robots_sitemaps(base) + list(discovery.SITEMAP_HINTS)
+    transient = False
     for hint in hints:
         target = hint if hint.startswith("http") else base + hint
         try:
@@ -318,12 +332,14 @@ def _find_sitemap(base: str) -> str | None:
             # if it were the whole sitemap.
             resp = net.fetch(target, timeout=20, retries=1, max_bytes=4000,
                              use_cache=False)
-        except net.FetchError:
+        except net.FetchError as exc:
+            if exc.status not in (404, 410):
+                transient = True
             continue
         head = resp.body[:2000]
         if b"<urlset" in head or b"<sitemapindex" in head:
-            return hint
-    return None
+            return hint, False
+    return None, not transient
 
 
 _RSS_LINK_RE = re.compile(r"<link>\s*(https?://[^<\s]+)\s*</link>")
@@ -331,8 +347,10 @@ _ATOM_LINK_RE = re.compile(
     r'<link[^>]*rel=["\']alternate["\'][^>]*href=["\'](https?://[^"\']+)["\']')
 
 
-def _feed_home_link(url: str) -> str | None:
+def _feed_home_link(url: str):
     """If `url` is itself a feed, the site homepage it says it belongs to.
+    Returns (homepage_link, page): `page` is the response when `url` turned
+    out to be an ordinary page, so detection need not fetch it again.
 
     A feed mirror (FeedBurner and the like) or a bare feed path has no
     WordPress API, sitemap or Ghost key of its own to probe -- those all live
@@ -342,13 +360,13 @@ def _feed_home_link(url: str) -> str | None:
     try:
         resp = net.fetch(url, timeout=20, retries=1)
     except net.FetchError:
-        return None
+        return None, None
     head = resp.body[:4000]
     if b"<rss" not in head and b"<feed" not in head:
-        return None
+        return None, resp        # an ordinary page; the caller may reuse it
     text = resp.text()[:4000]
     m = _RSS_LINK_RE.search(text) or _ATOM_LINK_RE.search(text)
-    return m.group(1) if m else None
+    return (m.group(1) if m else None), None
 
 
 __all__ = ["REGISTRY", "RECIPES", "recipe_for", "build", "detect",

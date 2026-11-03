@@ -244,7 +244,20 @@ class FeedItem:
     html: str | None
 
 
-def read_feed(feed_url: str, ctx, in_scope=lambda url: True) -> list[FeedItem]:
+def _junk_link(link: str) -> bool:
+    path = urlparse(link).path or "/"
+    return path == "/" or bool(_ASSET_RE.search(path))
+
+
+def remember(ctx, key: str, value) -> None:
+    """Record a hint, stamped so that an absence is only believed for a week."""
+    from datetime import date
+    ctx.config_updates[key] = value
+    ctx.config_updates["hints_checked"] = date.today().isoformat()
+
+
+def read_feed(feed_url: str, ctx, in_scope=lambda url: True,
+              config: dict | None = None) -> list[FeedItem]:
     """Read a feed and, where the site supports it, its older pages too.
 
     WordPress serves the archive through ``/feed/?paged=N``; some Atom feeds
@@ -263,8 +276,10 @@ def read_feed(feed_url: str, ctx, in_scope=lambda url: True) -> list[FeedItem]:
     limit = None if getattr(ctx, "newest_only", False) else getattr(ctx, "limit", None)
     counted = 0
 
+    config = config or {}
+    no_paging = config.get("feed_paging") is False and hints_fresh(config)
     for page in range(1, MAX_FEED_PAGES + 1):
-        if url is None:
+        if url is None or (page > 1 and no_paging):
             break
         ctx.check()
         try:
@@ -282,8 +297,12 @@ def read_feed(feed_url: str, ctx, in_scope=lambda url: True) -> list[FeedItem]:
             seen.add(key)
             items.append(it)
             fresh += 1
-            if in_scope(it.link):
+            if in_scope(it.link) and not _junk_link(it.link):
                 counted += 1
+        if not fresh and page == 2:
+            # A second page that adds nothing: this feed is one static
+            # document. Not worth asking again every sync.
+            remember(ctx, "feed_paging", False)
         if not fresh or (limit and counted >= limit):
             break
         # A limited source's "fetch new posts" does not page a feed back
@@ -457,7 +476,10 @@ def read_archive(base: str, config: dict, ctx, in_scope,
         # numbered pages are still served), then the ?paged= fallback.
         limit = MAX_ARCHIVE_PAGES if max_pages is None else min(
             MAX_ARCHIVE_PAGES, max(1, max_pages))
+        no_paging = config.get("archive_paging") is False and hints_fresh(config)
         for page in range(2, limit + 1):
+            if no_paging:
+                break
             ctx.check()
             more = _links_from(f"{base}{path.rstrip('/')}/page/{page}/", base)
             if not more:
@@ -468,6 +490,8 @@ def read_archive(base: str, config: dict, ctx, in_scope,
             more = [(u, h) for u, h in more if in_scope(u)]
             fresh = [(u, h) for u, h in more if u not in seen]
             if not fresh:
+                if page == 2:
+                    remember(ctx, "archive_paging", False)
                 break
             for u, h in fresh:
                 seen.setdefault(u, h)

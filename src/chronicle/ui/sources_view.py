@@ -34,7 +34,11 @@ def _limit_editor(initial: int | None):
                   lambda *_: spin.set_sensitive(not every.get_active()))
     group.add(spin)
     group.add(every)
-    return group, lambda: None if every.get_active() else int(spin.get_value())
+    def chosen():
+        spin.update()          # commit a value typed but not yet confirmed
+        return None if every.get_active() else int(spin.get_value())
+
+    return group, chosen
 
 
 def _format_eta(seconds: float) -> str:

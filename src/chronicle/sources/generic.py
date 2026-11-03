@@ -38,7 +38,8 @@ class GenericSource(Source):
         feed_url = discovery.find_feed_url(base, homepage_html, self.config, ctx)
         if feed_url:
             ctx.say(f"{self.name}: reading feed…")
-            feed_items = discovery.read_feed(feed_url, ctx, self.in_scope)
+            feed_items = discovery.read_feed(feed_url, ctx, self.in_scope,
+                                             self.config)
             report.feed_url, report.feed_count = feed_url, len(feed_items)
         # Remember where the feed lives — or, when the site was reachable,
         # that there is none — so later syncs skip the search.
@@ -95,7 +96,9 @@ class GenericSource(Source):
         # Absence hints ("" = looked, none) are believed for a week; stamp the
         # check so they expire and are asked again.
         held = {**self.config, **ctx.config_updates}
-        if (any(held.get(k) == "" for k in ("feed", "sitemap", "index"))
+        if ((any(held.get(k) == "" for k in ("feed", "sitemap", "index"))
+                or held.get("feed_paging") is False
+                or held.get("archive_paging") is False)
                 and (not discovery.hints_fresh(self.config)
                      or "hints_checked" in ctx.config_updates)):
             from datetime import date
