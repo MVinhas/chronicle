@@ -781,7 +781,7 @@ class MainWindow(Adw.ApplicationWindow):
         Gtk.UriLauncher(uri=uri).launch(self, None, None, None)
 
     def open_external(self, *_):
-        if self.current and self.current["url"]:
+        if self.current and (self.current["url"] or "").startswith(("http://", "https://")):
             self._on_link(None, self.current["url"])
 
     # -- syncing -----------------------------------------------------------

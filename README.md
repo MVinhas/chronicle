@@ -160,6 +160,29 @@ Wait But Why      184 readable  ·  2013–2026  ·  4% skipped
 Which is the useful part — it tells you, from your own reading rather than a
 guess, which blogs are earning their place in the queue.
 
+## Reading a book
+
+Chronicle can read a book you own as well as blogs. In the **Blogs** tab press
+**Add book…** and choose an `.epub` file (or run `chronicle add-book
+PATH.epub [--name NAME]`). The book is read from your disk, offline: you
+supply the file, and nothing is downloaded from any website.
+
+- It works with any **DRM-free** EPUB. DRM-protected EPUBs are not supported,
+  and Chronicle does not remove DRM.
+- Each chapter becomes an article, in the book's own order, titled from its
+  table of contents. Cover, title page, copyright and contents pages are
+  skipped. Images are kept; MathML equations are turned into plain text with
+  superscripts and subscripts (`E = mc`<sup>2</sup>); links between chapters
+  become plain text.
+- Chapters have no dates, so they sit after your dated posts, always in order
+  from the first chapter to the last, in either reading direction. Two books
+  never interleave. Read state, notes and highlights work as for any article.
+- Pressing **Fetch new posts** or **Full archive scan** on a book is cheap: the
+  file is re-read only if it changed. If you move or delete the file, the
+  update says so and the chapters you already have stay in your library.
+- The file is treated as untrusted: it is read in memory with size limits,
+  scripts are never run and external references are never followed.
+
 ## Keeping up to date
 
 Chronicle catches up by itself. A few seconds after you open it — once the

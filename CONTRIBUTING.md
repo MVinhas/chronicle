@@ -108,6 +108,7 @@ invisible library.
 cli() { flatpak run --command=chronicle-cli io.github.mvinhas.Chronicle "$@"; }
 
 cli add https://example.com  # detect and follow a new blog
+cli add-book book.epub      # read a DRM-free EPUB you own
 cli sources                  # what you follow
 cli rename example "Example" # change a blog's display name
 cli sync                     # build or update everything

@@ -1437,7 +1437,7 @@ def build_notice(article) -> str:
 
 
 _SOURCE_LABEL = {
-    "api": "publisher API", "feed": "publisher feed", "direct": "the original page",
+    "api": "publisher API", "feed": "publisher feed", "direct": "the original page", "epub": "your EPUB file",
     "wayback": "the Internet Archive", "browser": "the original page",
 }
 
@@ -1445,7 +1445,7 @@ _SOURCE_LABEL = {
 def build_provenance(article) -> str:
     bits = []
     url = article["url"]
-    if url:
+    if url and url.startswith(("http://", "https://")):     # not a book's epub://
         bits.append(f'Original: <a href="{_esc(url)}">{_esc(url)}</a>')
 
     origin = _SOURCE_LABEL.get(article["content_source"], article["content_source"])

@@ -8,7 +8,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, GLib, GObject, Gtk  # noqa: E402
+from gi.repository import Adw, Gio, GLib, GObject, Gtk  # noqa: E402
 
 from .. import db, sources  # noqa: E402
 
@@ -85,6 +85,11 @@ class SourcesView(Gtk.Box):
                          css_classes=["flat"])
         add.connect("clicked", lambda *_: self.open_add_dialog())
 
+        book = Gtk.Button(icon_name="x-office-document-symbolic",
+                          tooltip_text="Add a book — an EPUB file you own",
+                          css_classes=["flat"])
+        book.connect("clicked", lambda *_: self.open_book_dialog())
+
         # Two different jobs, so two buttons rather than one that sometimes
         # takes four seconds and sometimes forty minutes. The cheap one is the
         # routine action and gets the emphasis; the expensive one sits beside
@@ -103,6 +108,7 @@ class SourcesView(Gtk.Box):
         full.connect("clicked", lambda *_: self.emit("sync-requested", None, True))
 
         actions.append(add)
+        actions.append(book)
         actions.append(full)
         actions.append(fetch)
         self.group.set_header_suffix(actions)
@@ -155,6 +161,12 @@ class SourcesView(Gtk.Box):
                 (src["id"],)).fetchone()
 
             bits = [f"{ready:,} readable".replace(",", " ")]
+            if src["plugin"] == "epub":
+                done = conn.execute(
+                    "SELECT COUNT(*) c FROM articles a JOIN reading_state r "
+                    "ON r.article_id=a.id WHERE a.source_id=? AND "
+                    "r.read_at IS NOT NULL", (src["id"],)).fetchone()["c"]
+                bits[0] = f"{done} of {ready} chapters read"
             if count != ready:
                 bits.append(f"{count - ready} pending")
             if span["a"]:
@@ -311,6 +323,43 @@ class SourcesView(Gtk.Box):
         self.emit("library-changed")
 
     # -- add ---------------------------------------------------------------
+
+    def open_book_dialog(self) -> None:
+        """Pick an EPUB you own; it is read from disk, never downloaded."""
+        epubs = Gtk.FileFilter()
+        epubs.set_name("EPUB books (DRM-free)")
+        epubs.add_pattern("*.epub")
+        epubs.add_mime_type("application/epub+zip")
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        filters.append(epubs)
+        chooser = Gtk.FileDialog(title="Add a book", filters=filters,
+                                 default_filter=epubs)
+        chooser.open(self.window, None, self._on_book_chosen)
+
+    def _on_book_chosen(self, chooser, result) -> None:
+        try:
+            file = chooser.open_finish(result)
+        except GLib.Error:
+            return                                    # dismissed
+        path = file.get_path()
+        if not path:
+            return
+        self.window.toasts.add_toast(Adw.Toast(title="Reading the book…", timeout=3))
+        threading.Thread(target=self._add_book, args=(path,), daemon=True).start()
+
+    def _add_book(self, path: str) -> None:
+        from ..sources import epub as epub_source
+        conn = db.connect()
+        try:
+            db.init(conn)
+            row = epub_source.add_book_source(conn, path)
+            name = row["name"]
+        except Exception as exc:                      # noqa: BLE001
+            GLib.idle_add(self._added, None, str(exc))
+            return
+        finally:
+            conn.close()
+        GLib.idle_add(self._added, {"name": name, "detected": "your EPUB file"}, None)
 
     def open_add_dialog(self) -> None:
         dialog = Adw.AlertDialog(
