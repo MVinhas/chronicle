@@ -359,12 +359,14 @@ class Syncer:
                 for r in db.pending_content(conn, row["id"]):
                     if r["id"] not in have:
                         pending.append((r["id"], r["url"], None, None, {}))
+            failed_before = prog.failed
             self._fetch_bodies(conn, source, ctx, row, pending, prog, cache_images)
+            clean = prog.failed == failed_before
             # A source may need to know the whole job went through (a book
             # records that its file has been taken in, and drops chapters the
             # file no longer has). Never after a cancelled run.
             finish = getattr(source, "finish", None)
-            if finish is not None and not self.should_stop():
+            if finish is not None and clean and not self.should_stop():
                 try:
                     finish(conn, ctx)
                 except Exception:                     # noqa: BLE001

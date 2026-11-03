@@ -41,6 +41,7 @@ import threading
 import zipfile
 from xml.parsers import expat
 from dataclasses import dataclass, field
+from html import escape
 from urllib.parse import unquote, urlparse
 from xml.etree import ElementTree as ET
 
@@ -56,8 +57,9 @@ MAX_TOTAL_BYTES = 1_000_000_000       # all members, as declared
 MAX_TEXT_BYTES = 16_000_000           # one XML/XHTML member
 MAX_READ_BYTES = 200_000_000          # decompressed bytes read for one book
 FRONT_MAX_WORDS = 150                 # longer than this is never "just" front matter
+MAX_ELEMENTS = 200_000                # elements in one chapter
 MAX_NEST = 200                        # element nesting in a chapter
-MAX_RATIO = 200                       # uncompressed : compressed ...
+MAX_RATIO = 40                       # uncompressed : compressed ...
 RATIO_FLOOR = 1_000_000               # ... but only past this size
 
 ASSET_PREFIX = "epub-asset:/"
@@ -75,6 +77,12 @@ _FRONT_STEM = re.compile(
 _FRONT_TITLE = re.compile(
     r"^(cover|title page|half title|copyright( page)?|table of contents|"
     r"contents|colophon)$", re.I)
+
+
+# Serialises adding a book and pruning the library's copies.
+COPY_LOCK = threading.Lock()
+_COPY_NAME = re.compile(r"^[0-9a-f]{64}\.epub$")
+PRUNE_MIN_AGE = 300                   # seconds a copy is left alone after use
 
 
 class EpubError(Exception):
@@ -158,10 +166,14 @@ def store_copy(src: str, digest: str) -> str:
     from . import paths
     target = paths.BOOK_DIR / f"{digest}.epub"
     if target.exists():
+        try:
+            os.utime(target)               # in use: keep pruning away
+        except OSError:
+            pass
         return str(target)
+    tmp = target.with_name(f".{digest}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         paths.BOOK_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(f".{digest}.{os.getpid()}.{threading.get_ident()}.tmp")
         shutil.copyfile(src, tmp)
         os.replace(tmp, target)
     except FileNotFoundError:
@@ -169,19 +181,34 @@ def store_copy(src: str, digest: str) -> str:
     except OSError as exc:
         raise EpubError(f"Cannot copy {src} into the library: "
                         f"{exc.strerror or exc}") from None
+    finally:
+        try:
+            tmp.unlink()                   # only exists if the copy failed
+        except OSError:
+            pass
     return str(target)
 
 
-def prune_copies(keep: set[str]) -> int:
-    """Delete library copies no source refers to (paths in `keep` stay)."""
+def prune_copies(keep: set[str], protect: set[str] = frozenset()) -> int:
+    """Delete library copies no source refers to.
+
+    Only files the library itself named (<sha256>.epub) are ever candidates,
+    never one in `keep` or `protect` (a source's original file, say), and
+    never one touched in the last few minutes (an add or sync in flight).
+    """
+    import time
     from . import paths
-    removed = 0
     if not paths.BOOK_DIR.is_dir():
         return 0
-    wanted = {os.path.realpath(k) for k in keep}
-    for f in paths.BOOK_DIR.glob("*.epub"):
-        if os.path.realpath(f) not in wanted:
+    removed = 0
+    wanted = {os.path.realpath(k) for k in (*keep, *protect)}
+    with COPY_LOCK:
+        for f in paths.BOOK_DIR.glob("*.epub"):
+            if not _COPY_NAME.match(f.name) or os.path.realpath(f) in wanted:
+                continue
             try:
+                if time.time() - f.stat().st_mtime < PRUNE_MIN_AGE:
+                    continue
                 f.unlink()
                 removed += 1
             except OSError:
@@ -268,8 +295,9 @@ def _xml(data: bytes) -> ET.Element:
         return ET.fromstring(data)
     except (expat.ExpatError, ET.ParseError) as exc:
         if refused:
-            raise EpubError("Refusing this file: its metadata declares XML "
-                            "entities") from None
+            raise EpubError("Refusing this file: its metadata has an XML "
+                            "entity declaration or an internal DTD subset"
+                            ) from None
         raise EpubError(f"The book's metadata is malformed: {exc}") from None
 
 
@@ -373,7 +401,8 @@ def _build(zf, names, path, opf_path, opf) -> Book:
                         "order)")
 
     toc: list[_Entry] = []
-    front: set[str] = set()
+    front: set[str] = set()              # from the guide: suspicion only
+    strong: set[str] = set()             # landmarks: the book says so
     nav = next((h for h, _m, p in manifest.values() if "nav" in p), None)
     ncx_candidates = []
     if spine_el is not None and spine_el.get("toc") in manifest:
@@ -382,7 +411,7 @@ def _build(zf, names, path, opf_path, opf) -> Book:
                        if m == "application/x-dtbncx+xml"]
     ncx = next((c for c in ncx_candidates if c in names), None)
     if nav and nav in names:
-        toc, front = _read_nav(zf, nav)
+        toc, strong = _read_nav(zf, nav)
     if not toc and ncx:
         toc = _read_ncx(zf, ncx)
     guide = _first(opf, "guide")
@@ -398,6 +427,8 @@ def _build(zf, names, path, opf_path, opf) -> Book:
         by_doc.setdefault(e.href, []).append(e)
 
     chapters: list[Chapter] = []
+    parts: list[list[str]] = []           # html pieces per chapter, joined once
+    carried: list[str] = []               # division headings awaiting a chapter
     for doc in spine:
         entries = by_doc.get(doc, [])
         # One chapter per top-level entry: where a file holds several
@@ -410,7 +441,7 @@ def _build(zf, names, path, opf_path, opf) -> Book:
         raw = _read(zf, doc, MAX_TEXT_BYTES)
         pieces, doc_title, types = _prepare(raw, doc, names, entries)
         for piece in pieces:
-            if _is_front(piece, doc, doc_title, front, types, nav):
+            if _is_front(piece, doc, doc_title, front, strong, types, nav):
                 continue
             label = piece.title or piece.heading or doc_title
             continuation = (bool(toc) and not piece.from_toc
@@ -419,18 +450,26 @@ def _build(zf, names, path, opf_path, opf) -> Book:
             # title repeated, it is the next part of the chapter.
             html = _render(piece.body, "" if continuation else label)
             if not html:
+                # A contents entry that is only a heading ("BOOK ONE") has no
+                # chapter of its own; its words open the next one.
+                if piece.from_toc and piece.title and not continuation:
+                    carried.append(piece.title)
                 continue
+            html = "".join(f"<h2>{escape(t)}</h2>" for t in carried) + html
+            carried = []
             if continuation:
-                chapters[-1].html += html
+                parts[-1].append(html)
                 continue
             chapters.append(Chapter(
-                doc, label or f"Part {len(chapters) + 1}", html,
+                doc, label or f"Part {len(chapters) + 1}", "",
                 key=f"{doc}#{piece.frag}" if piece.frag else doc))
+            parts.append([html])
 
     if not chapters:
         raise EpubError("This book has no readable chapters")
     for i, ch in enumerate(chapters):
         ch.order = i
+        ch.html = "".join(parts[i])
     book.chapters = chapters
     if not book.title:
         book.title = posixpath.splitext(posixpath.basename(path))[0]
@@ -438,7 +477,7 @@ def _build(zf, names, path, opf_path, opf) -> Book:
 
 
 def _is_front(piece: "_Piece", doc: str, doc_title: str, front: set[str],
-              types: set[str], nav: str | None) -> bool:
+              strong: set[str], types: set[str], nav: str | None) -> bool:
     """Is this piece cover/title/copyright/contents rather than the book?
 
     Names, types and guide entries only raise suspicion; the text decides. A
@@ -447,11 +486,14 @@ def _is_front(piece: "_Piece", doc: str, doc_title: str, front: set[str],
     """
     if doc == nav and not piece.from_toc:
         return True
+    # What the book itself declares (a covering epub:type, a landmark) is
+    # taken at its word whatever the length.
+    if types & _FRONT_TYPES or doc in strong:
+        return True
     label = piece.title or piece.heading or doc_title or ""
     explicit = bool(piece.title) and not _FRONT_TITLE.match(piece.title)
     stem = posixpath.splitext(posixpath.basename(doc))[0].lower()
-    suspect = (doc in front or bool(types & _FRONT_TYPES)
-               or bool(_FRONT_TITLE.match(label))
+    suspect = (doc in front or bool(_FRONT_TITLE.match(label))
                or (not explicit and not piece.frag
                    and bool(_FRONT_STEM.match(stem))))
     if not suspect:
@@ -511,8 +553,8 @@ def _read_nav(zf, nav_path: str) -> tuple[list[_Entry], set[str]]:
         if "landmarks" in (n.get("epub:type") or ""):
             for a in n.find_all("a"):
                 if set((a.get("epub:type") or "").split()) & _FRONT_TYPES:
-                    href, _frag = _target(nav_path, a.get("href") or "")
-                    if href:
+                    href, frag = _target(nav_path, a.get("href") or "")
+                    if href and not frag:     # an anchor marks part of a file
                         front.add(href)
     return toc, front
 
@@ -588,6 +630,9 @@ def _prepare(raw: bytes, doc: str, names: set[str], entries=()):
     if _depth(body) > MAX_NEST:
         raise EpubError("Refusing this file: a chapter is nested "
                         "implausibly deep")
+    if len(body.find_all(True)) > MAX_ELEMENTS:
+        raise EpubError("Refusing this file: a chapter has implausibly many "
+                        "elements")
     types = _covering_types(body, soup)
     doc_title = ""
     if soup.title:
@@ -728,7 +773,12 @@ def _render(body, title: str) -> str:
     h = body.find(["h1", "h2", "h3"])
     if h is not None and wanted and re.sub(
             r"\W+", " ", h.get_text(" ", strip=True)).strip().lower() == wanted:
-        h.decompose()                  # the reader shows the title itself
+        # The reader shows the title itself; keep any picture in the heading.
+        pics = [i.extract() for i in h.find_all("img")]
+        if pics:
+            h.replace_with(*pics)
+        else:
+            h.decompose()
     html = htmlutil.sanitise(body, ASSET_PREFIX)
     if not htmlutil.word_count(html) and not htmlutil.count_images(html):
         return ""

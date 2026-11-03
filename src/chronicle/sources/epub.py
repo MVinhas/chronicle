@@ -27,12 +27,10 @@ from __future__ import annotations
 
 import os
 import re
-import threading
 
 from .. import db, epubfile, paths
 from .base import Content, Context, Source, Stub
 
-_ADD_LOCK = threading.Lock()
 _ORPHAN_ORDER = 1_000_000          # kept-but-removed chapters sort last
 
 
@@ -70,8 +68,27 @@ class EpubSource(Source):
             except epubfile.EpubError:
                 sha = None                   # unreadable now: use the copy
             if sha:
-                self._use = epubfile.store_copy(origin, sha)
-                if self._use != stored or sha != self.config.get("sha256"):
+                fresh = os.path.join(str(paths.BOOK_DIR), f"{sha}.epub")
+                existed = os.path.exists(fresh)
+                with epubfile.COPY_LOCK:
+                    candidate = epubfile.store_copy(origin, sha)
+                changed = sha != self.config.get("sha256")
+                try:
+                    if changed:
+                        epubfile.open_book(candidate).close()
+                except epubfile.EpubError:
+                    # Never let a damaged file displace a good copy.
+                    if not existed and candidate != stored:
+                        try:
+                            os.unlink(candidate)
+                        except OSError:
+                            pass
+                    self._use = stored
+                    ctx.result_note = ("original changed but is unreadable; "
+                                       "using the stored copy")
+                    return epubfile.file_sha256(stored)
+                self._use = candidate
+                if self._use != stored or changed:
                     ctx.config_updates.update(path=self._use, sha256=sha)
                 return sha
         self._use = stored
@@ -122,32 +139,67 @@ class EpubSource(Source):
             kept = self._retire_vanished(conn)
             if kept:
                 ctx.result_note += f"; kept {kept} removed chapters you annotated"
-        epubfile.prune_copies({
-            _config_path(r) for r in db.list_sources(conn)
-            if r["plugin"] == "epub"})
+        rows = [r for r in db.list_sources(conn) if r["plugin"] == "epub"]
+        epubfile.prune_copies({_config_path(r) for r in rows},
+                              protect={_origin_of(r) for r in rows})
 
     def _retire_vanished(self, conn) -> int:
+        """Settle chapters the new file no longer has under their old guids.
+
+        A chapter whose file name changed (EPUB 2 to EPUB 3, a re-export) is
+        the same chapter: it is matched to a new one by title, nearest in
+        reading order, and the reader's state moves across. What stays
+        unmatched is deleted only if it carries nothing of the reader's; else
+        it is kept and sorts after the book. Returns how many were kept.
+        """
+        def norm(t):
+            return re.sub(r"\W+", " ", t or "").strip().lower()
+
+        gone = [r for r in (self._article(conn, g)
+                            for g in sorted(self._known - self._yielded)) if r]
+        fresh: dict[str, list] = {}
+        for g in sorted(self._yielded - self._known):
+            r = self._article(conn, g)
+            if r:
+                fresh.setdefault(norm(r["title"]), []).append(r)
         kept = 0
-        for guid in sorted(self._known - self._yielded):
-            art = conn.execute(
-                "SELECT a.id, a.source_order, "
-                " EXISTS(SELECT 1 FROM notes n WHERE n.article_id=a.id "
-                "        AND n.body != '') AS has_note, "
-                " EXISTS(SELECT 1 FROM highlights h WHERE h.article_id=a.id) AS has_hl, "
-                " EXISTS(SELECT 1 FROM reading_state r WHERE r.article_id=a.id "
-                "        AND r.favourite_at IS NOT NULL) AS fav "
-                "FROM articles a WHERE a.source_id=? AND a.guid=?",
-                (self.id, guid)).fetchone()
-            if art is None:
-                continue
-            if art["has_note"] or art["has_hl"] or art["fav"]:
+        for old in sorted(gone, key=lambda r: r["source_order"]):
+            cands = fresh.get(norm(old["title"]))
+            if cands:
+                new = min(cands, key=lambda r: abs(r["source_order"] - old["source_order"]))
+                cands.remove(new)
+                self._move_state(conn, old["id"], new["id"])
+                conn.execute("DELETE FROM articles WHERE id=?", (old["id"],))
+            elif old["has_data"]:
                 kept += 1
-                if art["source_order"] < _ORPHAN_ORDER:
+                if old["source_order"] < _ORPHAN_ORDER:
                     conn.execute("UPDATE articles SET source_order=? WHERE id=?",
-                                 (_ORPHAN_ORDER + art["source_order"], art["id"]))
+                                 (_ORPHAN_ORDER + old["source_order"], old["id"]))
             else:
-                conn.execute("DELETE FROM articles WHERE id=?", (art["id"],))
+                conn.execute("DELETE FROM articles WHERE id=?", (old["id"],))
         return kept
+
+    def _article(self, conn, guid: str):
+        return conn.execute(
+            "SELECT a.id, a.title, a.source_order, ("
+            " EXISTS(SELECT 1 FROM notes n WHERE n.article_id=a.id AND n.body != '')"
+            " OR EXISTS(SELECT 1 FROM highlights h WHERE h.article_id=a.id)"
+            " OR EXISTS(SELECT 1 FROM reading_state r WHERE r.article_id=a.id"
+            "  AND (r.favourite_at IS NOT NULL OR r.read_at IS NOT NULL"
+            "       OR r.skipped_at IS NOT NULL OR r.scroll_pos > 0))"
+            ") AS has_data FROM articles a WHERE a.source_id=? AND a.guid=?",
+            (self.id, guid)).fetchone()
+
+    @staticmethod
+    def _move_state(conn, old_id: int, new_id: int) -> None:
+        conn.execute("DELETE FROM reading_state WHERE article_id=?", (new_id,))
+        conn.execute("UPDATE reading_state SET article_id=? WHERE article_id=?",
+                     (new_id, old_id))
+        conn.execute("DELETE FROM notes WHERE article_id=?", (new_id,))
+        conn.execute("UPDATE notes SET article_id=? WHERE article_id=?",
+                     (new_id, old_id))
+        conn.execute("UPDATE highlights SET article_id=? WHERE article_id=?",
+                     (new_id, old_id))
 
     def fetch_content(self, ctx: Context, url: str, stub_html: str | None = None,
                       base_url: str | None = None, extra: dict | None = None
@@ -185,6 +237,15 @@ def _config_path(row) -> str:
     return cfg.get("path") or row["homepage"]
 
 
+def _origin_of(row) -> str:
+    import json
+    try:
+        cfg = json.loads(row["config"] or "{}")
+    except ValueError:
+        cfg = {}
+    return cfg.get("origin") or row["homepage"]
+
+
 def find_book_source(conn, path: str):
     """The source already holding this file (same original path), or None."""
     want = os.path.realpath(os.path.expanduser(path))
@@ -212,7 +273,7 @@ def add_book_source(conn, path: str, name: str | None = None):
     """
     import json
     path = os.path.abspath(os.path.expanduser(path))
-    with _ADD_LOCK:                       # check-then-insert must be atomic
+    with epubfile.COPY_LOCK:                       # check-then-insert must be atomic
         existing = find_book_source(conn, path)
         if existing is not None:
             return existing

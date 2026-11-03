@@ -644,6 +644,213 @@ class TestStructureEdges(TmpMixin):
             "SELECT COUNT(*) c FROM sources").fetchone()["c"], 1)
 
 
+class TestRound2(TmpMixin):
+    def sync_(self):
+        return self.sync()
+
+    def src_cfg(self):
+        import json
+        return json.loads(self.conn.execute(
+            "SELECT config FROM sources").fetchone()["config"])
+
+    # -- chapter text ------------------------------------------------------
+
+    def test_title_heading_with_an_image_keeps_the_image(self):
+        body = '<h1>Chapter One<img src="a.png" alt="x"/></h1><p>' + "w " * 30 + "</p>"
+        make_epub(self.epub, [("c", "c.xhtml", "Chapter One", body)],
+                  images_={"a.png": PNG})
+        html = epubfile.open_book(self.epub).chapters[0].html
+        self.assertIn("<img", html)
+        self.assertNotIn("Chapter One", html)
+
+    def test_division_heading_is_carried_to_the_next_chapter(self):
+        chs = [("p", "part.xhtml", "BOOK ONE", "<h1>BOOK ONE</h1>"),
+               ("c", "c.xhtml", "Chapter I", chapter_body("Chapter I"))]
+        make_epub(self.epub, chs)
+        book = epubfile.open_book(self.epub)
+        self.assertEqual([c.title for c in book.chapters], ["Chapter I"])
+        self.assertIn("BOOK ONE", book.chapters[0].html)
+
+    def test_division_heading_cut_from_a_big_file_is_carried_too(self):
+        body = ('<h2 id="p">PART ONE</h2><h2 id="c1">Chapter I</h2><p>'
+                + "w " * 40 + "</p>")
+        make_epub(self.epub, [("a", "a.xhtml", None, body)], toc_entries=[
+            ("a.xhtml#p", "PART ONE", 0), ("a.xhtml#c1", "Chapter I", 0)])
+        book = epubfile.open_book(self.epub)
+        self.assertEqual([c.title for c in book.chapters], ["Chapter I"])
+        self.assertIn("PART ONE", book.chapters[0].html)
+
+    def test_many_continuations_join_in_order(self):
+        chs = [("c0", "c0.xhtml", "One", chapter_body("One"))]
+        chs += [(f"k{i}", f"k{i}.xhtml", None, f"<p>part{i:04d}</p>")
+                for i in range(300)]
+        make_epub(self.epub, chs)
+        html = epubfile.open_book(self.epub).chapters[0].html
+        marks = [html.index(f"part{i:04d}") for i in range(300)]
+        self.assertEqual(marks, sorted(marks))
+
+    def test_explicit_front_matter_type_wins_whatever_the_length(self):
+        long_ = "<p>" + "legal " * 400 + "</p>"
+        chs = [("a", "a.xhtml", "Legal", long_, 'epub:type="copyright-page"'),
+               ("b", "b.xhtml", "Real", chapter_body("Real"))]
+        make_epub(self.epub, chs)
+        self.assertEqual([c.title for c in epubfile.open_book(self.epub).chapters],
+                         ["Real"])
+
+    def test_landmark_wins_whatever_the_length_but_not_with_an_anchor(self):
+        long_ = "<p>" + "legal " * 400 + "</p>"
+        chs = [("a", "a.xhtml", "Legal", long_), ("b", "b.xhtml", "Real", long_)]
+        marks = ('<nav epub:type="landmarks"><ol>'
+                 '<li><a epub:type="copyright-page" href="a.xhtml">C</a></li>'
+                 '<li><a epub:type="titlepage" href="b.xhtml#top">T</a></li>'
+                 '</ol></nav>')
+        make_epub(self.epub, chs, nav_extra=marks)
+        self.assertEqual([c.title for c in epubfile.open_book(self.epub).chapters],
+                         ["Real"])
+
+    def test_entity_refusal_message_is_accurate(self):
+        evil = ('<?xml version="1.0"?><!DOCTYPE p []><package '
+                'xmlns="http://www.idpf.org/2007/opf"><metadata/><manifest/>'
+                '<spine/></package>')
+        with zipfile.ZipFile(self.epub, "w") as z:
+            z.writestr("META-INF/container.xml", CONTAINER)
+            z.writestr("OEBPS/content.opf", evil)
+        with self.assertRaisesRegex(epubfile.EpubError, "DTD"):
+            epubfile.open_book(self.epub)
+
+    def test_limits_are_tight_enough(self):
+        self.assertLessEqual(epubfile.MAX_RATIO, 40)
+        body = "<span>x</span>" * 100
+        make_epub(self.epub, [("c", "c.xhtml", "T", chapter_body("T") + body)])
+        with mock.patch.object(epubfile, "MAX_ELEMENTS", 50):
+            with self.assertRaisesRegex(epubfile.EpubError, "elements"):
+                epubfile.open_book(self.epub)
+
+    # -- library copy ------------------------------------------------------
+
+    def test_unreadable_changed_original_keeps_the_good_copy(self):
+        make_epub(self.epub, standard_chapters()[4:])
+        self.add_book()
+        self.sync()
+        good = self.src_cfg()
+        Path(self.epub).write_bytes(b"corrupt")
+        self.sync()
+        self.assertEqual(self.src_cfg()["path"], good["path"])
+        self.assertTrue(os.path.exists(good["path"]))
+        src = self.conn.execute("SELECT * FROM sources").fetchone()
+        self.assertEqual(src["last_sync_status"], "ok")
+        self.assertIn("unreadable", src["last_sync_message"])
+        self.assertEqual(len(self.titles()), 3)
+        self.assertEqual([p.name for p in paths.BOOK_DIR.iterdir()],
+                         [Path(good["path"]).name])
+
+    def _old(self, path):
+        os.utime(path, (1_000_000_000, 1_000_000_000))
+
+    def test_prune_only_touches_library_named_copies(self):
+        paths.BOOK_DIR.mkdir(parents=True, exist_ok=True)
+        mine = paths.BOOK_DIR / "my-own-book.epub"
+        mine.write_bytes(b"x")
+        stale = paths.BOOK_DIR / ("a" * 64 + ".epub")
+        stale.write_bytes(b"x")
+        self._old(mine)
+        self._old(stale)
+        epubfile.prune_copies(set())
+        self.assertTrue(mine.exists())
+        self.assertFalse(stale.exists())
+
+    def test_prune_never_removes_a_sources_original(self):
+        paths.BOOK_DIR.mkdir(parents=True, exist_ok=True)
+        f = paths.BOOK_DIR / ("b" * 64 + ".epub")
+        f.write_bytes(b"x")
+        self._old(f)
+        epubfile.prune_copies(set(), protect={str(f)})
+        self.assertTrue(f.exists())
+
+    def test_prune_skips_fresh_copies(self):
+        paths.BOOK_DIR.mkdir(parents=True, exist_ok=True)
+        f = paths.BOOK_DIR / ("c" * 64 + ".epub")
+        f.write_bytes(b"x")
+        epubfile.prune_copies(set())
+        self.assertTrue(f.exists())
+
+    def test_failed_copy_leaves_no_temp_file(self):
+        make_epub(self.epub, standard_chapters()[4:])
+
+        def partial(src, dst):
+            Path(dst).write_bytes(b"half")
+            raise OSError(28, "No space left on device")
+        with mock.patch.object(epubfile.shutil, "copyfile", partial):
+            with self.assertRaises(epubfile.EpubError):
+                epubfile.store_copy(self.epub, "d" * 64)
+        self.assertEqual(list(paths.BOOK_DIR.iterdir()), [])
+
+    # -- re-import ---------------------------------------------------------
+
+    def renamed(self, drop=()):
+        return [(f"n{i}", f"renamed{i}.xhtml", t, chapter_body(t))
+                for i, t in enumerate(("Chapter One", "Chapter Two", "Chapter Three"))
+                if t not in drop]
+
+    def test_renamed_files_keep_reader_state_by_title(self):
+        make_epub(self.epub, standard_chapters()[4:])
+        sid = self.add_book()["id"]
+        self.sync()
+        ids = {r["title"]: r["id"] for r in self.conn.execute(
+            "SELECT id, title FROM articles")}
+        db.set_read(self.conn, ids["Chapter One"])
+        db.set_note(self.conn, ids["Chapter Two"], "n2")
+        db.add_highlight(self.conn, ids["Chapter Two"], "word word")
+        db.toggle_favourite(self.conn, ids["Chapter Three"])
+        make_epub(self.epub, self.renamed())
+        self.sync()
+        rows = {r["title"]: r["id"] for r in self.conn.execute(
+            "SELECT id, title FROM articles WHERE source_id=?", (sid,))}
+        self.assertEqual(set(rows), set(ids))
+        self.assertEqual(len(rows), 3)                      # nothing duplicated
+        self.assertIsNotNone(self.conn.execute(
+            "SELECT read_at FROM reading_state WHERE article_id=?",
+            (rows["Chapter One"],)).fetchone()["read_at"])
+        self.assertEqual(db.get_note(self.conn, rows["Chapter Two"]), "n2")
+        self.assertEqual(len(db.list_highlights(self.conn, rows["Chapter Two"])), 1)
+        self.assertIsNotNone(self.conn.execute(
+            "SELECT favourite_at FROM reading_state WHERE article_id=?",
+            (rows["Chapter Three"],)).fetchone()["favourite_at"])
+
+    def test_unmatched_chapter_with_reader_data_is_never_deleted(self):
+        make_epub(self.epub, standard_chapters()[4:])
+        sid = self.add_book()["id"]
+        self.sync()
+        ids = {r["title"]: r["id"] for r in self.conn.execute(
+            "SELECT id, title FROM articles")}
+        db.set_read(self.conn, ids["Chapter Three"])
+        make_epub(self.epub, self.renamed(drop=("Chapter Three",)))
+        self.sync()
+        left = {r["title"] for r in self.conn.execute(
+            "SELECT title FROM articles WHERE source_id=?", (sid,))}
+        self.assertEqual(left, {"Chapter One", "Chapter Two", "Chapter Three"})
+
+    def test_failed_body_means_the_refresh_is_not_recorded(self):
+        make_epub(self.epub, standard_chapters()[4:])
+        self.add_book()
+        self.sync()
+        make_epub(self.epub, [(c, f, t, b + "<p>edit</p>") for c, f, t, b in
+                              standard_chapters()[4:]])
+        from chronicle.sources import epub as epub_source
+        with mock.patch.object(epub_source.EpubSource, "fetch_content",
+                               side_effect=RuntimeError("boom")):
+            self.sync()
+        self.assertNotIn("edit", self.first_html_())
+        self.assertNotEqual(self.src_cfg().get("synced_sha256"),
+                            self.src_cfg().get("sha256"))
+        self.sync()
+        self.assertIn("edit", self.first_html_())
+
+    def first_html_(self):
+        return self.conn.execute("SELECT content_html h FROM articles "
+                                 "ORDER BY source_order").fetchone()["h"]
+
+
 class TestImages(TmpMixin):
     def test_images_are_extracted_and_cached_locally(self):
         body = (chapter_body("One") + '<p><img src="fig/a.png" alt="fig"/></p>'
@@ -789,7 +996,6 @@ class TestResync(TmpMixin):
         ids = {r["title"]: r["id"] for r in self.conn.execute(
             "SELECT id, title FROM articles")}
         db.set_note(self.conn, ids["Chapter Two"], "keep me")
-        db.set_read(self.conn, ids["Chapter Three"])      # read alone: not kept
         make_epub(self.epub, standard_chapters()[4:5])    # only chapter one left
         self.sync()
         left = {r["title"] for r in self.conn.execute(
