@@ -9,6 +9,7 @@ import codecs
 import gzip
 import hashlib
 import json
+import math
 import logging
 import random
 import re
@@ -212,6 +213,11 @@ class Response:
         return json.loads(self.text())
 
 
+def _bare(host: str) -> str:
+    host = host.lower()
+    return host[4:] if host.startswith("www.") else host
+
+
 class _HostLimiter:
     """Minimum interval between request *starts* to the same host.
 
@@ -232,9 +238,10 @@ class _HostLimiter:
         self.min_gap: dict[str, float] = {}
 
     def gap(self, host: str) -> float:
-        return max(self.interval, self.min_gap.get(host, 0.0))
+        return max(self.interval, self.min_gap.get(_bare(host), 0.0))
 
     def wait(self, host: str) -> None:
+        host = _bare(host)      # www.x and x are one server, one budget
         with self._lock:
             now = time.monotonic()
             slot = max(now, self._next.get(host, 0.0))
@@ -278,6 +285,7 @@ def parse_crawl_delay(robots: str) -> float | None:
 
     Our own user-agent group wins over `*`; other crawlers' groups are ignored.
     """
+    robots = robots.lstrip("\ufeff")
     groups: list[tuple[list[str], float | None]] = []
     agents: list[str] = []
     delay: float | None = None
@@ -299,35 +307,43 @@ def parse_crawl_delay(robots: str) -> float | None:
         last_was_agent = False
         if key == "crawl-delay":
             try:
-                delay = max(0.0, float(value))
+                parsed = float(value)
             except ValueError:
-                pass
+                continue
+            if math.isfinite(parsed) and parsed >= 0:
+                delay = parsed
     if agents:
         groups.append((agents, delay))
-    for wanted in ("chronicle", "*"):
-        for names, d in groups:
-            if any(wanted in n for n in names if wanted != "*") or \
-                    (wanted == "*" and "*" in names):
-                if d is not None:
-                    return min(d, CRAWL_DELAY_CAP)
+    # The group naming us wins outright, even if it sets no delay: robots.txt
+    # semantics are that a specific group replaces the `*` one, not adds to it.
+    for matches in (lambda n: "chronicle" in n, lambda n: n == "*"):
+        found = [d for names, d in groups if any(matches(n) for n in names)]
+        if found:
+            delays = [d for d in found if d is not None]
+            return min(max(delays), CRAWL_DELAY_CAP) if delays else None
     return None
 
 
 def apply_crawl_delay(url: str) -> None:
     """Read the host's robots.txt (once an hour) and honour its Crawl-delay."""
-    host = urllib.parse.urlparse(url).netloc
-    if not host:
+    parsed = urllib.parse.urlparse(url)
+    if not parsed.netloc:
         return
+    host = _bare(parsed.netloc)
     now = time.monotonic()
     if now - _crawl_checked.get(host, -_CRAWL_TTL) < _CRAWL_TTL:
         return
     _crawl_checked[host] = now
-    scheme = urllib.parse.urlparse(url).scheme or "https"
     try:
-        text = fetch(f"{scheme}://{host}/robots.txt", timeout=15, retries=1,
-                     max_bytes=200_000).text()
-    except FetchError:
-        _limiter.min_gap.pop(host, None)
+        text = fetch(f"{parsed.scheme or 'https'}://{parsed.netloc}/robots.txt",
+                     timeout=15, retries=1, max_bytes=200_000).text()
+    except FetchError as exc:
+        if exc.status in (404, 410):
+            _limiter.min_gap.pop(host, None)      # no robots.txt: no request
+        else:
+            # Timeout, cancel, 5xx: say nothing about the site's wishes. Keep
+            # what is known and look again in a minute, not an hour.
+            _crawl_checked[host] = now - _CRAWL_TTL + 60
         return
     delay = parse_crawl_delay(text)
     if delay:

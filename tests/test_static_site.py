@@ -224,6 +224,50 @@ class TestCrawlDelay(unittest.TestCase):
                          net.CRAWL_DELAY_CAP)
         self.assertIsNone(p("User-agent: *\nCrawl-delay: soon\n"))
 
+    def test_group_semantics_and_encoding(self):
+        p = net.parse_crawl_delay
+        # Our own group wins, even without a delay: no fallback to '*'.
+        self.assertIsNone(p("User-agent: chronicle\nDisallow: /x\n\n"
+                            "User-agent: *\nCrawl-delay: 10\n"))
+        self.assertEqual(p("\ufeffUser-agent: *\nCrawl-delay: 10\n"), 10.0)
+        self.assertEqual(p("User-agent: *\r\nCrawl-delay: 10\r\n"), 10.0)
+        for bad in ("inf", "nan", "-3", "1e9x"):
+            self.assertIsNone(p(f"User-agent: *\nCrawl-delay: {bad}\n"), bad)
+
+    def test_www_and_bare_host_share_the_floor(self):
+        fn = FakeNet()
+        fn.add("https://www.slow.example/robots.txt", "User-agent: *\nCrawl-delay: 7\n")
+        with fn.patched():
+            net.apply_crawl_delay("https://www.slow.example/")
+        self.assertEqual(net._limiter.gap("slow.example"), 7.0)
+        self.assertEqual(net._limiter.gap("www.slow.example"), 7.0)
+
+    def test_a_failed_robots_fetch_keeps_the_known_delay_and_retries_soon(self):
+        fn = FakeNet()
+        fn.add("https://slow.example/robots.txt", "User-agent: *\nCrawl-delay: 7\n")
+        with fn.patched():
+            net.apply_crawl_delay("https://slow.example/")
+        net._crawl_checked["slow.example"] -= net._CRAWL_TTL + 1   # expired
+        fn.dead = True
+        with fn.patched():
+            net.apply_crawl_delay("https://slow.example/")
+        self.assertEqual(net._limiter.gap("slow.example"), 7.0)
+        fn.dead = False
+        fn.requests.clear()
+        with fn.patched():
+            net.apply_crawl_delay("https://slow.example/")   # too soon: a minute
+        self.assertEqual(fn.count("robots.txt"), 0)
+        net._crawl_checked["slow.example"] -= 61
+        with fn.patched():
+            net.apply_crawl_delay("https://slow.example/")
+        self.assertEqual(fn.count("robots.txt"), 1)    # retried, not an hour on
+
+    def test_a_404_robots_means_no_delay(self):
+        fn = FakeNet()
+        with fn.patched():
+            net.apply_crawl_delay("https://plain.example/")
+        self.assertEqual(net._limiter.gap("plain.example"), net._limiter.interval)
+
     def test_the_limiter_spaces_that_host_but_not_others(self):
         lim = net._HostLimiter(0.0)
         lim.min_gap["slow.example"] = 10.0
