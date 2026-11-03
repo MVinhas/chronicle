@@ -99,6 +99,18 @@
   </recommends>
 
   <releases>
+    <release version="1.10.0" date="2026-11-03">
+      <description>
+        <ul>
+          <li>Read from the latest post backwards. Press B, or choose "Read newest first" in the menu, and next means the next-older article; the library, resume and the position count all follow. Undated articles stay at the end either way, and the choice is remembered. "chronicle queue --order oldest|newest" does the same from the command line.</li>
+          <li>Read a book you own. "Add book…" imports a DRM-free EPUB as a source with one article per chapter, in book order, with its images and equations, stored for offline reading. A book is always read from chapter one onwards, even when reading newest first. Nothing is downloaded from any site.</li>
+          <li>Follow only the last N posts of a blog. New blogs start at the last 50; "Limit…" on each blog (or "chronicle set-limit") changes it, and "All posts" removes it. The limit only controls how far back Chronicle fetches: posts you already have are never deleted, and new posts always arrive.</li>
+          <li>Pasting a section of a blog (fs.blog/blog/, a category page) is handled properly: a publisher's API is used when it covers the whole site, and a section stays a section. The blog is named after the site, not the page you pasted.</li>
+          <li>Works in Progress, Farnam Street and aresluna.org now work. Sites that ask for Crawl-delay in robots.txt are asked politely at that pace, short feed summaries are replaced by the full article, feed and media files are no longer mistaken for articles, and adding a slow site keeps telling you it is working.</li>
+          <li>Existing libraries repair themselves once: feed summaries stored as articles are re-fetched in full, and stray entries for a site's homepage or feed file are removed, never touching anything you have read, noted or highlighted.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.9.1" date="2026-10-10">
       <description>
         <ul>
