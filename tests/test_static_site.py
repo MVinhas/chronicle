@@ -137,6 +137,67 @@ class TestStaticSite(SyncHarness):
         self.assertEqual(row["content_status"], "ok")
         self.assertGreater(row["word_count"], 100)
 
+    @staticmethod
+    def _forget_repairs(c):
+        import json
+        cfg = json.loads(c.execute("SELECT config FROM sources").fetchone()[0])
+        for k in ("junk_checked", "teasers_checked"):
+            cfg.pop(k, None)
+        c.execute("UPDATE sources SET config=?", (json.dumps(cfg),))
+
+    def _stale_teaser(self, slug="walk-0", first=True):
+        c = self.conn()
+        if first:
+            self._forget_repairs(c)
+        c.execute("UPDATE articles SET content_status='ok', content_source='feed',"
+                  " word_count=23, content_html='<p>' || replace(hex(zeroblob(23)),"
+                  "'00','w ') || '</p>' WHERE url LIKE ?", (f"%/{slug}/",))
+        c.commit()
+        c.close()
+
+    def test_teaser_rows_stored_as_ok_by_an_older_version_are_repaired_once(self):
+        fn = build_site()
+        self.sync(fn)
+        self._stale_teaser()
+        fn.requests.clear()
+        self.sync(fn)
+        row = [r for r in self.rows() if r["url"].endswith("/walk-0/")][0]
+        self.assertGreater(row["word_count"], 100)
+        self.assertEqual(fn.count("/walk-0/"), 1)
+        # Once: a second pass does not look again.
+        self._stale_teaser(first=False)
+        fn.requests.clear()
+        self.sync(fn)
+        self.assertEqual(fn.count("/walk-0/"), 0)
+
+    def test_junk_rows_are_removed_unless_they_carry_user_data(self):
+        fn = build_site()
+        self.sync(fn)
+        c = self.conn()
+        sid = c.execute("SELECT id FROM sources").fetchone()["id"]
+        self._forget_repairs(c)
+        ids = {}
+        for name, url in (("root", SITE + "/"), ("feed", SITE + "/main.rss"),
+                          ("foreign", "https://unrelated.example/post/"),
+                          ("kept", "https://unrelated.example/read/")):
+            cur = c.execute(
+                "INSERT INTO articles(source_id,guid,url,title,discovered_at,"
+                "content_status) VALUES(?,?,?,?,datetime('now'),'ok')",
+                (sid, url, url, name))
+            ids[name] = cur.lastrowid
+        c.execute("INSERT INTO reading_state(article_id, read_at) VALUES(?, "
+                  "datetime('now'))", (ids["kept"],))
+        c.commit()
+        c.close()
+        self.sync(fn)
+        left = {r["url"] for r in self.rows()}
+        self.assertNotIn(SITE + "/", left)
+        self.assertNotIn(SITE + "/main.rss", left)
+        self.assertNotIn("https://unrelated.example/post/", left)
+        self.assertIn("https://unrelated.example/read/", left)
+        self.assertEqual(len([u for u in left if "/walk-" in u or "/old-" in u]),
+                         RECENT + OLDER)
+
     def test_a_resync_makes_no_per_article_requests(self):
         fn = build_site()
         self.sync(fn)

@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from . import db, htmlutil, images, net, sources
+from .sources import discovery
 from .sources.base import Cancelled, Context
 
 log = logging.getLogger("chronicle.sync")
@@ -343,6 +344,12 @@ class Syncer:
             (row["id"],)).fetchone()["m"]
         incremental = bool(newest_only and newest_known)
 
+        # One-off repairs for what older versions stored. Teasers: rows whose
+        # whole body is a few words of feed summary, stored as fine, are looked
+        # at again (once) so the real page can replace them. Junk: the site
+        # root, a feed or media file, an unrelated host.
+        recheck = self._repair_state(conn, row, config, known, incremental)
+
         # A blog with nothing archived yet is a first build: several hundred
         # pages of one site, where the polite spacing between requests *is*
         # the cost. Halve it for that one job. Routine updates fetch a handful
@@ -427,6 +434,9 @@ class Syncer:
             if ctx.config_updates:
                 db.merge_source_config(conn, row["id"], ctx.config_updates)
 
+        if recheck and not self.should_stop():
+            db.merge_source_config(conn, row["id"], {"teasers_checked": True})
+
         if fetch_content and not self.should_stop():
             # Also pick up anything left unfetched by earlier runs — a stub
             # for it may not have been yielded this time at all.
@@ -465,6 +475,45 @@ class Syncer:
         kind = "new posts" if incremental else "full scan"
         db.mark_sync(conn, row["id"], status,
                      f"{kind}: {discovered} examined, {prog.new} new{note}")
+
+    def _repair_state(self, conn, row, config: dict, known: dict,
+                      incremental: bool) -> bool:
+        """Apply the one-off repairs; True if this run does the teaser check
+        (and so should record that it was done, found anything or not)."""
+        if row["plugin"] == "epub":
+            return False
+        if row["plugin"] == "generic" and not config.get("junk_checked"):
+            self._drop_junk(conn, row)
+            db.merge_source_config(conn, row["id"], {"junk_checked": True})
+        if incremental or config.get("teasers_checked"):
+            return False
+        for r in conn.execute(
+                "SELECT guid FROM articles WHERE source_id=? AND "
+                "content_source='feed' AND content_status IN ('ok','partial') "
+                "AND word_count < ?", (row["id"], discovery.SUMMARY_WORDS)):
+            if r["guid"] in known:
+                dated, _state, rank = known[r["guid"]]
+                known[r["guid"]] = (dated, "missing", rank)
+        return True
+
+    @staticmethod
+    def _drop_junk(conn, row) -> None:
+        from urllib.parse import urlparse
+        host = urlparse(row["homepage"] or "").netloc
+        for r in conn.execute("SELECT id, url FROM articles WHERE source_id=?",
+                              (row["id"],)).fetchall():
+            path = urlparse(r["url"]).path or "/"
+            if not (path == "/" or discovery._ASSET_RE.search(path)
+                    or not discovery.same_site(r["url"], host)):
+                continue
+            # Anything the reader has touched stays, whatever it is.
+            if conn.execute(
+                    "SELECT 1 FROM reading_state WHERE article_id=? UNION ALL "
+                    "SELECT 1 FROM highlights WHERE article_id=? UNION ALL "
+                    "SELECT 1 FROM notes WHERE article_id=?",
+                    (r["id"],) * 3).fetchone():
+                continue
+            conn.execute("DELETE FROM articles WHERE id=?", (r["id"],))
 
     def _redetect(self, conn, row, config, prog: Progress):
         """Re-run detection for a source whose stored route is obsolete.

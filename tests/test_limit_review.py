@@ -360,3 +360,37 @@ class TestHintExpiry(SyncHarness):
         run_sync(fn, self.dbfile, spec=_SPEC)
         self.assertGreater(fn.count("sitemap"), 0)
         self.assertNotEqual(self._cfg()["hints_checked"], "2020-01-01")
+
+
+class TestShortFeedPosts(SyncHarness):
+    def _feed(self, fn, link, words):
+        fn.add(BASE + "/feed/", _rss([dict(
+            title="N", link=link, date="Thu, 10 Sep 2026 00:00:00 GMT",
+            html=" ".join(["short"] * words))]))
+
+    def test_a_short_post_whose_page_is_unreadable_keeps_its_feed_body(self):
+        fn = FakeNet()
+        _home(fn)
+        link = f"{BASE}/note-x/"
+        fn.add(link, "<html><body><div id='app'></div><script>r()</script>"
+                     "</body></html>")
+        self._feed(fn, link, 25)
+        run_sync(fn, self.dbfile, spec=_SPEC)
+        row = self.urls()[0]
+        self.assertEqual(row["content_status"], "ok")
+        fn.requests.clear()
+        run_sync(fn, self.dbfile, spec=_SPEC)
+        self.assertEqual(fn.count("/note-x/"), 0)
+
+    def test_a_clearly_longer_page_wins_over_a_teaser(self):
+        from fakesite import PARA
+        fn = FakeNet()
+        _home(fn)
+        link = f"{BASE}/essay/"
+        fn.add(link, post_html("Essay", "2026-09-10T00:00:00+00:00", paragraphs=4))
+        self._feed(fn, link, 8)
+        run_sync(fn, self.dbfile, spec=_SPEC)
+        c = self.conn()
+        words = c.execute("SELECT word_count w FROM articles").fetchone()["w"]
+        c.close()
+        self.assertGreater(words, 100)

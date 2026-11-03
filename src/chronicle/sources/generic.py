@@ -230,12 +230,23 @@ class GenericSource(Source):
         guid = net.canonical_url(resp.url)
         title = cand.title or htmlutil.clean_title(
             htmlutil.page_title(soup), self.name)
-        # A teaser in the feed is not the article: the page is.
-        use_feed = bool(cand.feed_html) and not cand.summary_only
+        # A short feed body is a teaser only if the page really holds more.
+        # A 25-word dated post whose page is script-rendered, or a microblog
+        # entry that is the whole post, keeps what the feed gave.
+        use_feed = bool(cand.feed_html)
+        if use_feed and cand.summary_only:
+            node = htmlutil.extract_main(soup, [])
+            page_words = (len(node.get_text(" ", strip=True).split())
+                          if node is not None else 0)
+            use_feed = not (page_words >= discovery.SUMMARY_WORDS and
+                            page_words >= 2 * htmlutil.word_count(cand.feed_html))
+        extra = {}
+        if cand.feed_html and not use_feed and ctx.known and guid in ctx.known:
+            extra["refresh"] = True     # replace the stored teaser
         return Stub(guid=guid, url=resp.url, title=title, date=date,
                     source_order=cand.order,
                     raw_html=cand.feed_html if use_feed else html,
-                    base_url=resp.url,
+                    base_url=resp.url, extra=extra,
                     content_source="feed" if use_feed else "direct")
 
     def _is_article(self, cand: Candidate, soup) -> bool:
