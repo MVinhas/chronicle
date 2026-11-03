@@ -142,13 +142,26 @@ class TestWipTwice(TestWorksInProgress):
         self.assertEqual(titles[f"{WIP}/issue/alpha/"], "Alpha")
 
 
+class RestRouteNet(FakeNet):
+    """WordPress answers ?rest_route= on ANY path, as the real thing does."""
+
+    def fetch(self, url, **kw):
+        if "rest_route=/wp/v2/posts" in url:
+            self.requests.append(url)
+            from chronicle import net as _net
+            return _net.Response(url=url, status=200,
+                                 headers={"x-wp-total": "9000"},
+                                 body=b'[{"id": 1}]')
+        return super().fetch(url, **kw)
+
+
 class TestApiTakeover(SyncHarness):
     def _wp(self, fn):
         fn.add(f"{BASE}/wp-json/wp/v2/posts?per_page=1", '[{"id": 1}]',
                headers={"x-wp-total": "9000"})
 
     def test_category_page_stays_a_scoped_generic_source(self):
-        fn = FakeNet()
+        fn = RestRouteNet()
         fn.add(BASE + "/", "<html><head><title>News Site</title></head></html>")
         fn.add(f"{BASE}/category/essays/",
                "<html><title>Essays | News Site</title></html>")
@@ -159,10 +172,12 @@ class TestApiTakeover(SyncHarness):
         self.assertEqual(spec["config"]["path_prefix"], "/category/essays")
 
     def test_multisite_subsite_uses_its_own_api(self):
-        fn = FakeNet()
+        fn = RestRouteNet()
         fn.add(BASE + "/", "<html><head><title>Big University</title></head></html>")
         fn.add(f"{BASE}/labs/robotics/", "<html><title>Robotics Lab</title></html>")
         self._wp(fn)
+        fn.add(f"{BASE}/labs/robotics/wp-json/",
+               json.dumps({"name": "Robotics", "home": f"{BASE}/labs/robotics"}))
         fn.add(f"{BASE}/labs/robotics/wp-json/wp/v2/posts?per_page=1",
                '[{"id": 2}]', headers={"x-wp-total": "12"})
         with fn.patched():
@@ -171,8 +186,21 @@ class TestApiTakeover(SyncHarness):
         self.assertEqual(spec["config"]["api_root"],
                          f"{BASE}/labs/robotics/wp-json/wp/v2")
 
+    def test_a_subpath_api_that_describes_the_root_is_not_a_subsite(self):
+        fn = RestRouteNet()
+        fn.add(BASE + "/", "<html><head><title>Big University</title></head></html>")
+        fn.add(f"{BASE}/labs/robotics/", "<html><title>Robotics Lab</title></html>")
+        self._wp(fn)
+        fn.add(f"{BASE}/labs/robotics/wp-json/", json.dumps({"home": BASE}))
+        fn.add(f"{BASE}/labs/robotics/wp-json/wp/v2/posts?per_page=1",
+               '[{"id": 2}]')
+        with fn.patched():
+            spec = detect(BASE + "/labs/robotics/")
+        self.assertEqual(spec["plugin"], "generic")
+        self.assertEqual(spec["config"]["path_prefix"], "/labs/robotics")
+
     def test_root_api_without_subsite_api_keeps_generic_section(self):
-        fn = FakeNet()
+        fn = RestRouteNet()
         fn.add(BASE + "/", "<html><head><title>Big University</title></head></html>")
         fn.add(f"{BASE}/labs/robotics/", "<html><title>Robotics Lab</title></html>")
         self._wp(fn)
@@ -182,7 +210,7 @@ class TestApiTakeover(SyncHarness):
         self.assertEqual(spec["config"]["path_prefix"], "/labs/robotics")
 
     def test_blog_listing_path_still_takes_the_api(self):
-        fn = FakeNet()
+        fn = RestRouteNet()
         fn.add(BASE + "/", "<html><head><title>FS</title></head></html>")
         self._wp(fn)
         with fn.patched():
@@ -198,3 +226,20 @@ class TestApiTakeover(SyncHarness):
         with fn.patched():
             spec = detect(BASE + "/tag/essays/")
         self.assertEqual(spec["plugin"], "generic")
+
+    def test_rest_route_api_root_builds_a_single_query_string(self):
+        from chronicle.sources.wordpress import WordPressSource
+        src = WordPressSource({"name": "x", "homepage": BASE, "slug": "x",
+                               "plugin": "wordpress", "id": 1},
+                              {"api_root": f"{BASE}/?rest_route=/wp/v2"})
+        url = src.posts_url(per_page=50, page=1)
+        self.assertEqual(url.count("?"), 1, url)
+        self.assertIn("rest_route=/wp/v2/posts", url)
+
+    def test_a_failing_api_is_reported_not_called_up_to_date(self):
+        fn = FakeNet()      # the configured API 404s
+        spec = {"name": "W", "plugin": "wordpress", "homepage": BASE,
+                "config": {"api_root": f"{BASE}/gone/?rest_route=/wp/v2"}}
+        prog = run_sync(fn, self.dbfile, spec=spec)
+        self.assertNotIn("up to date", prog.message)
+        self.assertTrue(prog.warnings)

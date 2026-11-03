@@ -197,7 +197,14 @@ def detect(url: str) -> dict:
     # (multisite) is taken over by an API; otherwise the section stays generic.
     # 1. WordPress REST API -- every post, publisher timestamps, full bodies.
     api_base = base + section if is_section else base
-    for path in _WP_PATHS:
+    # WordPress answers ?rest_route= on ANY path (it is just a query string to
+    # the root install), so that probe proves nothing about a section. Only
+    # /wp-json/ at the section counts, and only if that API says it is the
+    # subsite's own: its index must name the section as its home.
+    wp_paths = _WP_PATHS[:1] if is_section else _WP_PATHS
+    if is_section and not _is_subsite_api(api_base):
+        wp_paths = ()
+    for path in wp_paths:
         try:
             resp = net.fetch(api_base + path, headers={"Accept": "application/json"},
                              timeout=25, retries=2)
@@ -251,6 +258,20 @@ def detect(url: str) -> dict:
             "config": config, "partial": True,
             "detected": "no API or sitemap — will merge the blog's archive "
                         "pages and feed"}
+
+
+def _is_subsite_api(section_url: str) -> bool:
+    """Does {section}/wp-json/ describe a WordPress installed *at* the section
+    (a multisite subsite), rather than the root install answering on a path?"""
+    try:
+        data = net.fetch_json(section_url + "/wp-json/", timeout=20, retries=1)
+    except (net.FetchError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    want = section_url.rstrip("/").lower()
+    return any(str(data.get(k) or "").rstrip("/").lower() == want
+               for k in ("home", "url"))
 
 
 def _fetch_quiet(url: str) -> str | None:

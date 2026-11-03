@@ -31,6 +31,15 @@ class WordPressSource(Source):
     def api_root(self) -> str:
         return self.config.get("api_root") or f"{self.homepage.rstrip('/')}/wp-json/wp/v2"
 
+    def posts_url(self, **query) -> str:
+        """The posts endpoint with a query. An api_root of the
+        `?rest_route=/wp/v2` form already holds the one '?' the URL may have,
+        so the route is extended and the rest joined with '&'."""
+        qs = "&".join(f"{k}={v}" for k, v in query.items())
+        if "?" in self.api_root:
+            return f"{self.api_root}/posts&{qs}"
+        return f"{self.api_root}/posts?{qs}"
+
     def discover(self, ctx: Context):
         # The REST API can do the filtering itself: `after` is the whole of
         # "fetch new posts" in one parameter, so a routine update reads one
@@ -47,8 +56,8 @@ class WordPressSource(Source):
         page, order, total = 1, 0, None
         while True:
             ctx.check()
-            url = (f"{self.api_root}/posts?per_page={per_page}&page={page}"
-                   f"&orderby=date&order={direction}&_fields={FIELDS}{window}")
+            url = (self.posts_url(per_page=per_page, page=page)
+                   + f"&orderby=date&order={direction}&_fields={FIELDS}{window}")
             try:
                 resp = net.fetch(url, headers={"Accept": "application/json"})
                 posts = json.loads(resp.text())

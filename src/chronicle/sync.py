@@ -190,6 +190,9 @@ class Progress:
     failed: int = 0
     done: bool = False
     error: str = ""
+    # Sources that failed or found nothing. The closing message must not call
+    # an archive "up to date" when one of them never read a single post.
+    warnings: list = field(default_factory=list)
     started_at: float = field(default_factory=time.monotonic)
 
     @property
@@ -269,9 +272,14 @@ class Syncer:
                 self._sync_source(conn, row, prog, fetch_content, cache_images,
                                   newest_only)
             prog.done = True
-            prog.message = ("Stopped" if self.should_stop()
-                            else f"Archive up to date — {prog.new} new, "
-                                 f"{prog.fetched} articles retrieved")
+            if self.should_stop():
+                prog.message = "Stopped"
+            elif prog.warnings:
+                prog.message = ("Finished with problems — "
+                                + "; ".join(prog.warnings[:3]))
+            else:
+                prog.message = (f"Archive up to date — {prog.new} new, "
+                                f"{prog.fetched} articles retrieved")
         except Exception as exc:                      # noqa: BLE001 - reported to UI
             prog.error = str(exc)
             prog.done = True
@@ -402,11 +410,13 @@ class Syncer:
         except net.FetchError as exc:
             db.mark_sync(conn, row["id"], "error", str(exc))
             self._say(prog, f"{row['name']}: {exc}")
+            prog.warnings.append(f"{row['name']}: {exc}")
             return
         except Exception as exc:                      # noqa: BLE001
             db.mark_sync(conn, row["id"], "error", str(exc))
             log.error("discover failed for %s: %s", row["slug"], traceback.format_exc())
             self._say(prog, f"{row['name']} failed: {exc}")
+            prog.warnings.append(f"{row['name']} failed: {exc}")
             return
         finally:
             # Verdicts already reached are valid however discovery ended.
