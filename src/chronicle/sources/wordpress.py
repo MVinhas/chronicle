@@ -36,13 +36,18 @@ class WordPressSource(Source):
         # page of nothing instead of paginating the entire history.
         since = ctx.since()
         window = f"&after={since}" if since else ""
+        # A "last N posts" scan asks newest-first and stops after N, so a
+        # 3,000-post blog set to follow 50 costs one request, not sixty.
+        limit = None if since else ctx.limit
+        per_page = min(limit, 100) if limit else PAGE_SIZE
+        direction = "desc" if limit else "asc"
         ctx.say(f"Querying {self.name} REST API"
                 f"{' for posts since ' + since[:10] if since else ''}…")
         page, order, total = 1, 0, None
         while True:
             ctx.check()
-            url = (f"{self.api_root}/posts?per_page={PAGE_SIZE}&page={page}"
-                   f"&orderby=date&order=asc&_fields={FIELDS}{window}")
+            url = (f"{self.api_root}/posts?per_page={per_page}&page={page}"
+                   f"&orderby=date&order={direction}&_fields={FIELDS}{window}")
             try:
                 resp = net.fetch(url, headers={"Accept": "application/json"})
                 posts = json.loads(resp.text())
@@ -60,11 +65,13 @@ class WordPressSource(Source):
             for post in posts:
                 if post.get("status") not in (None, "publish"):
                     continue
+                if limit and order >= limit:
+                    return
                 yield self._stub(post, order)
                 order += 1
             ctx.say(f"{self.name}: {order} posts",
                     order / total if total else None)
-            if len(posts) < PAGE_SIZE:
+            if len(posts) < per_page or (limit and order >= limit):
                 break
             page += 1
 

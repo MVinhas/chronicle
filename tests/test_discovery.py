@@ -880,7 +880,7 @@ WP = {"name": "WP Blog", "plugin": "wordpress", "homepage": WPBASE,
 
 
 class FakeWordPress(FakeNet):
-    """A REST origin that honours per_page/page/after.
+    """A REST origin that honours per_page/page/after/order.
 
     Answering the query rather than a canned URL is the point: it proves the
     adapter narrowed what it asked for, not merely that some string appeared
@@ -901,6 +901,8 @@ class FakeWordPress(FakeNet):
         page = int((q.get("page") or ["1"])[0])
 
         chosen = sorted(p for p in self.posts if after is None or p[0] > after)
+        if (q.get("order") or ["asc"])[0] == "desc":
+            chosen.reverse()
         window = chosen[(page - 1) * per_page: page * per_page]
         body = json.dumps([
             {"id": i, "date_gmt": d, "modified_gmt": d, "link": f"{WPBASE}/{slug}/",

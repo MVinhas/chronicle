@@ -125,6 +125,34 @@ def due_sources(conn, now: datetime | None = None) -> list[int]:
     return due
 
 
+def newest_stubs(stubs, limit: int, known: dict | None) -> list:
+    """The stubs worth recording under a "last N posts" limit.
+
+    The newest N by date, undated ones counting after every dated one. A stub
+    for an article already stored is never dropped -- the limit decides what
+    to fetch, not what to forget -- but it does count toward N, so a source
+    that has already been read back 50 posts is not asked for 50 more.
+    Adapters apply the limit at discovery; this keeps one that does not (a
+    static site that can only be enumerated whole) from undoing it.
+    """
+    stubs = list(stubs)
+    by_site = sorted(stubs, key=lambda s: s.source_order)
+    dated = sorted((s for s in by_site if s.date.known),
+                   key=lambda s: s.date.iso, reverse=True)
+    ranked = dated + [s for s in by_site if not s.date.known]
+    top = {id(s) for s in ranked[:limit]}
+    return [s for s in stubs if id(s) in top or s.guid in (known or {})]
+
+
+def _newest_ids(conn, source_id: int, limit: int) -> set[int]:
+    """Ids of the source's newest `limit` stored articles (undated last)."""
+    rows = conn.execute(
+        "SELECT id FROM articles WHERE source_id=? "
+        "ORDER BY (published_at IS NULL), published_at DESC, id LIMIT ?",
+        (source_id, limit)).fetchall()
+    return {r["id"] for r in rows}
+
+
 @dataclass
 class Progress:
     source: str = ""
@@ -281,6 +309,12 @@ class Syncer:
         # of pages and can afford to be gentler, so they go back to full.
         net.set_rate_scale(FIRST_BUILD_RATE_SCALE if not known else 1.0)
 
+        # "Last N posts" bounds how far back a scan reaches. Not for books,
+        # which always import whole, and not for "fetch new posts", which must
+        # add every new post however many there are.
+        limit = (None if incremental or row["plugin"] == "epub"
+                 else sources.config_limit(config))
+
         new_rejects: list[str] = []
         ctx = Context(
             progress=lambda msg, frac=None: self._say(prog, msg, frac),
@@ -291,18 +325,20 @@ class Syncer:
             reject=new_rejects.append,
             newest_only=incremental,
             newest_known=newest_known,
+            limit=limit,
         )
 
         discovered = 0
         pending: list[tuple[int, str, str | None, str | None]] = []
         try:
-            for stub in source.discover(ctx):
+            # Scope is enforced here as well as in the adapter, so a source
+            # scoped to one section can never quietly pull in the whole site.
+            found = (s for s in source.discover(ctx) if source.in_scope(s.url))
+            if limit:
+                found = newest_stubs(found, limit, known)
+            for stub in found:
                 if self.should_stop():
                     break
-                # Enforced here as well as in the adapter, so a source scoped
-                # to one section can never quietly pull in the whole site.
-                if not source.in_scope(stub.url):
-                    continue
                 discovered += 1
                 prog.discovered += 1
                 article_id, created = self._record(conn, row["id"], stub)
@@ -356,8 +392,13 @@ class Syncer:
             # deferred to the next full scan.
             if not incremental:
                 have = {item[0] for item in pending}
+                # Under a limit only the newest N are worth draining: pending
+                # bodies from an earlier, wider scan are left for a scan that
+                # asks for them (a raised limit), not fetched by this one.
+                within = _newest_ids(conn, row["id"], limit) if limit else None
                 for r in db.pending_content(conn, row["id"]):
-                    if r["id"] not in have:
+                    if r["id"] not in have and (within is None
+                                                or r["id"] in within):
                         pending.append((r["id"], r["url"], None, None, {}))
             failed_before = prog.failed
             self._fetch_bodies(conn, source, ctx, row, pending, prog, cache_images)
@@ -398,6 +439,9 @@ class Syncer:
         # A section scope the user asked for survives the route change.
         if config.get("path_prefix") and "path_prefix" not in new_config:
             new_config["path_prefix"] = config["path_prefix"]
+        # So does the user's choice of how many posts to follow.
+        if "limit" in config:
+            new_config["limit"] = config["limit"]
         new_config["detected"] = spec["detected"] + " (re-detected)"
         db.update_source_route(conn, row["id"], spec["plugin"], new_config,
                                spec["homepage"])

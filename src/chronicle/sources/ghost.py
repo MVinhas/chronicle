@@ -55,11 +55,15 @@ class GhostSource(Source):
         since = ctx.since()
         window = (f"&filter={urllib.parse.quote(f'published_at:>{since}')}"
                   if since else "")
+        # As in WordPress: a limit means newest first, and stop after N.
+        limit = None if since else ctx.limit
+        per_page = min(limit, 100) if limit else PAGE_SIZE
+        direction = "desc" if limit else "asc"
         page, order, total = 1, 0, None
         while True:
             ctx.check()
-            url = (f"{base}/ghost/api/content/posts/?key={key}&limit={PAGE_SIZE}"
-                   f"&page={page}&order=published_at%20asc"
+            url = (f"{base}/ghost/api/content/posts/?key={key}&limit={per_page}"
+                   f"&page={page}&order=published_at%20{direction}"
                    f"&fields=id,title,url,published_at,updated_at,excerpt,visibility,slug"
                    f"&formats=html{window}")
             try:
@@ -76,11 +80,13 @@ class GhostSource(Source):
                 total = (data.get("meta", {}).get("pagination", {}) or {}).get("total")
                 ctx.say(f"{self.name}: {total or '?'} posts to import")
             for post in posts:
+                if limit and order >= limit:
+                    return
                 yield self._stub(post, order)
                 order += 1
             ctx.say(f"{self.name}: {order} posts", order / total if total else None)
             pag = data.get("meta", {}).get("pagination", {}) or {}
-            if not pag.get("next"):
+            if not pag.get("next") or (limit and order >= limit):
                 break
             page = pag["next"]
 

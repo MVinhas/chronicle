@@ -27,6 +27,33 @@ class DetectError(Exception):
     """The site cannot be ingested at all — e.g. it never answers."""
 
 
+# Newly added blogs follow the last 50 posts. Sources saved before the limit
+# existed have no "limit" key and stay unlimited; books are never limited.
+DEFAULT_LIMIT = 50
+
+
+def parse_limit(text: str) -> int | None:
+    """'all' -> None (no limit); a positive integer -> that integer."""
+    text = str(text).strip().lower()
+    if text == "all":
+        return None
+    try:
+        value = int(text)
+    except ValueError:
+        raise ValueError(f"expected a positive number or 'all', got {text!r}")
+    if value < 1:
+        raise ValueError(f"expected a positive number or 'all', got {text!r}")
+    return value
+
+
+def config_limit(config: dict | None) -> int | None:
+    """The limit stored in a source's config; absent or unusable means all."""
+    value = (config or {}).get("limit")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
 def build(row, config: dict | None = None) -> Source:
     cls = REGISTRY.get(row["plugin"], GenericSource)
     return cls(row, config)

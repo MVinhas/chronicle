@@ -51,7 +51,12 @@ class GenericSource(Source):
         #    already carry anything published since the last update.
         sitemap_urls: list[str] = []
         sitemap_src = None
-        if not ctx.newest_only:
+        # Under a "last N posts" limit a feed that already dated N posts has
+        # named the newest N; the sitemap and the deep archive could only add
+        # older ones, so they are not read.
+        feed_covers_limit = bool(
+            ctx.limit and sum(1 for it in feed_items if it.date.known) >= ctx.limit)
+        if not ctx.newest_only and not feed_covers_limit:
             sitemap_urls, sitemap_src = discovery.read_sitemaps(
                 base, self.config, ctx)
             report.sitemap_url, report.sitemap_count = sitemap_src, len(sitemap_urls)
@@ -71,7 +76,8 @@ class GenericSource(Source):
 
         archive_entries, index = discovery.read_archive(
             base, self.config, ctx, self.in_scope, is_known=already_known,
-            max_pages=discovery.NEWEST_ARCHIVE_PAGES if ctx.newest_only else None,
+            max_pages=(discovery.NEWEST_ARCHIVE_PAGES
+                       if ctx.newest_only or feed_covers_limit else None),
             admit=self.scope_by_membership if self.path_prefix else None)
         report.archive_index = index
         report.archive_count = len(archive_entries)
@@ -84,6 +90,8 @@ class GenericSource(Source):
         pool = discovery.merge(feed_items, sitemap_urls, archive_entries,
                                self.in_scope)
         report.candidates = len(pool)
+        if ctx.limit and len(pool) > ctx.limit:
+            pool = discovery.newest(pool, ctx.limit)
         ctx.result_note = report.summary()
 
         if not pool:

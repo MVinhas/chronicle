@@ -419,6 +419,24 @@ def set_source_config(conn, source_id: int, config: dict) -> None:
                  (json.dumps(config), source_id))
 
 
+def set_source_limit(conn, source_id: int, limit: int | None) -> None:
+    """Set how many recent posts to follow; None removes the limit.
+
+    Only bounds future fetching: nothing already stored is touched.
+    """
+    row = conn.execute("SELECT config FROM sources WHERE id=?",
+                       (source_id,)).fetchone()
+    try:
+        config = json.loads(row["config"] or "{}") if row else {}
+    except json.JSONDecodeError:
+        config = {}
+    if limit is None:
+        config.pop("limit", None)
+    else:
+        config["limit"] = int(limit)
+    set_source_config(conn, source_id, config)
+
+
 def update_source_route(conn, source_id: int, plugin: str, config: dict,
                         homepage: str) -> None:
     """Point a source at a freshly-detected ingestion route."""

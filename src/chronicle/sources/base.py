@@ -76,6 +76,13 @@ class Context:
     # a candidate older than this is already accounted for, so enumeration can
     # stop rather than walk back through the whole history.
     newest_known: str | None = None
+    # "Last N posts": how far back this sync should reach, or None for the
+    # whole history. Set by the Syncer from the source's config -- and left
+    # None for books, which always import fully, and for "fetch new posts",
+    # which must add every new post however many there are. Adapters apply it
+    # at discovery so nothing beyond it is requested; the Syncer enforces it
+    # again on what comes back.
+    limit: int | None = None
 
     # How far back a server-side "published after" filter reaches beyond the
     # newest article already held. WordPress compares `after` against the

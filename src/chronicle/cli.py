@@ -31,6 +31,17 @@ def cmd_sources(args) -> int:
     return 0
 
 
+def _limit_arg(text: str) -> int | None:
+    try:
+        return sources.parse_limit(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc))
+
+
+def _describe_limit(limit: int | None) -> str:
+    return "all posts" if limit is None else f"the last {limit} posts"
+
+
 def cmd_add(args) -> int:
     conn = db.get_conn()
     print(f"Inspecting {args.url} …")
@@ -49,9 +60,28 @@ def cmd_add(args) -> int:
         .replace("www.", "").replace(".", "-")
     config = dict(spec.get("config") or {})
     config["detected"] = spec["detected"]
+    if args.limit is not None:
+        config["limit"] = args.limit
     sid = db.add_source(conn, slug, spec["name"], spec["plugin"],
                         spec["homepage"], config)
-    print(f"Added as '{slug}' (id {sid}). Run: chronicle sync --source {slug}")
+    print(f"Added as '{slug}' (id {sid}), following {_describe_limit(args.limit)}. "
+          f"Run: chronicle sync --source {slug}")
+    return 0
+
+
+def cmd_set_limit(args) -> int:
+    conn = db.get_conn()
+    row = conn.execute("SELECT * FROM sources WHERE slug=?", (args.slug,)).fetchone()
+    if not row:
+        print(f"No such source: {args.slug}", file=sys.stderr)
+        return 1
+    if row["plugin"] == "epub":
+        print(f"{row['name']} is a book; books are always imported whole.",
+              file=sys.stderr)
+        return 1
+    db.set_source_limit(conn, row["id"], args.limit)
+    print(f"{row['name']} now follows {_describe_limit(args.limit)}. Posts "
+          f"already archived are kept; run a full sync to reach further back.")
     return 0
 
 
@@ -244,7 +274,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     a = sub.add_parser("add", help="follow a new blog")
     a.add_argument("url"); a.add_argument("--slug")
+    a.add_argument("--limit", type=_limit_arg, default=sources.DEFAULT_LIMIT,
+                   metavar="N|all",
+                   help="follow only the last N posts (default %(default)s); "
+                        "'all' for the whole archive")
     a.set_defaults(fn=cmd_add)
+
+    sl = sub.add_parser("set-limit", help="change how many recent posts a "
+                                          "blog follows")
+    sl.add_argument("slug")
+    sl.add_argument("limit", type=_limit_arg, metavar="N|all")
+    sl.set_defaults(fn=cmd_set_limit)
 
     ab = sub.add_parser("add-book", help="read a DRM-free EPUB file you own")
     ab.add_argument("path"); ab.add_argument("--name")

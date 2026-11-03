@@ -226,6 +226,9 @@ def read_feed(feed_url: str, ctx) -> list[FeedItem]:
     seen: set[str] = set()
     url: str | None = feed_url
     first_page_size = 0
+    # Feeds list newest first, so under a "last N posts" limit the first N
+    # items are the ones wanted and older pages are never requested.
+    limit = getattr(ctx, "limit", None)
 
     for page in range(1, MAX_FEED_PAGES + 1):
         if url is None:
@@ -246,7 +249,7 @@ def read_feed(feed_url: str, ctx) -> list[FeedItem]:
             seen.add(key)
             items.append(it)
             fresh += 1
-        if not fresh:
+        if not fresh or (limit and len(items) >= limit):
             break
         if next_url:
             url = net.absolutise(url, next_url)
@@ -617,6 +620,17 @@ _CONF_RANK = {"unknown": 0, "inferred": 1, "medium": 2, "high": 3, "exact": 4}
 
 def _rank(d: dates.PubDate) -> int:
     return _CONF_RANK.get(d.confidence, 0) if d.known else -1
+
+
+def newest(pool: dict[str, Candidate], limit: int) -> dict[str, Candidate]:
+    """The newest `limit` candidates by date, undated ones after every dated
+    one (in the site's own order). Candidates already archived count toward
+    the limit like any other; they are simply not fetched again later."""
+    by_site = sorted(pool.values(), key=lambda c: c.order)
+    dated = sorted((c for c in by_site if c.date.known),
+                   key=lambda c: c.date.iso, reverse=True)
+    ranked = dated + [c for c in by_site if not c.date.known]
+    return {c.guid: c for c in ranked[:limit]}
 
 
 def probe_order(pool: dict[str, Candidate]) -> list[Candidate]:
