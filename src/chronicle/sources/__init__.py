@@ -46,6 +46,14 @@ RECIPES = [
     dict(plugin="paulgraham", name="Paul Graham", hosts=("paulgraham.com",),
          note="No date metadata exists; dates are read from each essay's "
               "dateline, giving month precision."),
+    # REST is switched off and the sitemap lists junk, but /rss.xml carries the
+    # full history (undated by body, dated by pubDate) and every article lives
+    # under /issue/. A recipe may pin generic-plugin config like this.
+    dict(plugin="generic", name="Works in Progress",
+         hosts=("worksinprogress.co",),
+         config={"feed": "/rss.xml", "path_prefix": "/issue/"},
+         note="Full history from /rss.xml; only /issue/<slug>/ pages are "
+              "articles, dated from each page's own metadata."),
 ]
 
 
@@ -101,7 +109,8 @@ def detect(url: str) -> dict:
     recipe = recipe_for(host)
     if recipe is not None:
         return {"plugin": recipe["plugin"], "name": recipe["name"],
-                "homepage": base, "config": {}, "partial": False,
+                "homepage": base, "config": dict(recipe.get("config") or {}),
+                "partial": False,
                 "detected": "built-in recipe", "note": recipe["note"]}
 
     # One homepage fetch serves everything below: the site title, the Ghost
@@ -116,15 +125,14 @@ def detect(url: str) -> dict:
         # fussy, not a dead one.
         home_dead = exc.status is None
 
-    # Title comes from the URL as given, so a section index names itself after
-    # the section rather than the site. The bare hostname is the honest
-    # fallback: truncating at the first dot turns nav.al into "Nav", which is
-    # simply wrong.
-    name = None
-    if parsed.path.rstrip("/"):
+    # The site's own name wins over the pasted page's title: a section index
+    # is titled "Archive - Site" or "Blog | Site", and naming the blog after
+    # its archive page is simply wrong. The page title is only a fallback for
+    # a homepage that gives nothing. The bare hostname is the last resort:
+    # truncating at the first dot turns nav.al into "Nav".
+    name = _site_title_from(home_html)
+    if not name and parsed.path.rstrip("/"):
         name = _site_title_from(_fetch_quiet(url))
-    if not name:
-        name = _site_title_from(home_html)
     name = name or host.replace("www.", "")
 
     # The site does not answer at all — no DNS, no connection, not even an
@@ -141,23 +149,9 @@ def detect(url: str) -> dict:
     if feed_link:
         config["feed"] = feed_link
 
-    # A path means the user asked for one section, not the whole site -- unless
-    # the path itself is a conventional "everything I've published" listing
-    # (ribbonfarm.com/archive/ and the like). Those enumerate posts that live
-    # all over the site, not under that path, so scoping to it would reject
-    # every post the index actually finds.
-    section = parsed.path.rstrip("/")
-    if section and section not in ("", "/"):
-        cfg = dict(config, strategy="archive", index=section + "/")
-        if section.lower() in _LISTING_PATHS:
-            return {"plugin": "generic", "name": name, "homepage": base,
-                    "config": cfg, "partial": False,
-                    "detected": f"archive index at {section}/, following its pagination"}
-        cfg["path_prefix"] = section
-        return {"plugin": "generic", "name": name, "homepage": base,
-                "config": cfg, "partial": False,
-                "detected": f"section index at {section}/, following its pagination"}
-
+    # APIs live at the site root, so they are probed first even when the user
+    # pasted a path: /blog/ or /archive/ on a WordPress or Ghost site should
+    # still read the publisher's own post list, not scrape an index page.
     # 1. WordPress REST API -- every post, publisher timestamps, full bodies.
     for path in _WP_PATHS:
         try:
@@ -182,7 +176,24 @@ def detect(url: str) -> dict:
                     "config": {"content_key": m.group(1)}, "partial": False,
                     "detected": "Ghost Content API"}
 
-    # 3. No API. The generic source merges every remaining route — sitemap,
+    # 3. No API, but a path: the user asked for one section, not the whole
+    #    site -- unless the path itself is a conventional "everything I've published" listing
+    # (ribbonfarm.com/archive/ and the like). Those enumerate posts that live
+    # all over the site, not under that path, so scoping to it would reject
+    # every post the index actually finds.
+    section = parsed.path.rstrip("/")
+    if section and section not in ("", "/"):
+        cfg = dict(config, strategy="archive", index=section + "/")
+        if section.lower() in _LISTING_PATHS:
+            return {"plugin": "generic", "name": name, "homepage": base,
+                    "config": cfg, "partial": False,
+                    "detected": f"archive index at {section}/, following its pagination"}
+        cfg["path_prefix"] = section
+        return {"plugin": "generic", "name": name, "homepage": base,
+                "config": cfg, "partial": False,
+                "detected": f"section index at {section}/, following its pagination"}
+
+    # 4. No API. The generic source merges every remaining route — sitemap,
     #    archive pages, feed — so detection just records where a sitemap is
     #    (robots.txt first, then convention) to save the first sync a probe.
     sitemap = _find_sitemap(base)
@@ -215,7 +226,7 @@ def _site_title_from(html: str | None) -> str | None:
                    lambda: soup.title.get_text(strip=True) if soup.title else None):
         val = getter()
         if val:
-            val = re.split(r"\s*[|–—·]\s*", val.strip())[0].strip()
+            val = re.split(r"\s*[|–—·]\s*|\s+-\s+", val.strip())[0].strip()
             if 2 <= len(val) <= 48:
                 return val
     return None
