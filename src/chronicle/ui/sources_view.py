@@ -18,6 +18,25 @@ from .. import db, sources  # noqa: E402
 SKIP_RATE_MINIMUM = 5
 
 
+def _limit_editor(initial: int | None):
+    """Rows for choosing how many recent posts to follow.
+
+    Returns (widget, get) where get() is the chosen limit, None meaning every
+    post. Shared by the add dialog and the per-blog Limit dialog.
+    """
+    group = Adw.PreferencesGroup()
+    every = Adw.SwitchRow(title="All posts", active=initial is None)
+    spin = Adw.SpinRow.new_with_range(1, 10000, 1)
+    spin.set_title("Last posts to follow")
+    spin.set_value(initial or sources.DEFAULT_LIMIT)
+    spin.set_sensitive(initial is not None)
+    every.connect("notify::active",
+                  lambda *_: spin.set_sensitive(not every.get_active()))
+    group.add(spin)
+    group.add(every)
+    return group, lambda: None if every.get_active() else int(spin.get_value())
+
+
 def _format_eta(seconds: float) -> str:
     seconds = max(0, int(seconds))
     if seconds < 60:
@@ -173,6 +192,13 @@ class SourcesView(Gtk.Box):
                 bits.append(f"{count - ready} pending")
             if span["a"]:
                 bits.append(f"{span['a'][:4]}–{span['b'][:4]}")
+            try:
+                config = json.loads(src["config"] or "{}")
+            except json.JSONDecodeError:
+                config = {}
+            limit = sources.config_limit(config)
+            if limit and src["plugin"] != "epub":
+                bits.append(f"last {limit}")
             if src["last_sync_at"]:
                 bits.append(f"updated {src['last_sync_at'][:10]}")
             elif not count:
@@ -193,10 +219,6 @@ class SourcesView(Gtk.Box):
 
             # How this archive is built, and what the last update found —
             # useful detail that would crowd the subtitle.
-            try:
-                config = json.loads(src["config"] or "{}")
-            except json.JSONDecodeError:
-                config = {}
             detail = [config.get("detected") or ""]
             if src["last_sync_message"]:
                 detail.append(f"Last update: {src['last_sync_message']}")
@@ -214,6 +236,14 @@ class SourcesView(Gtk.Box):
                                 tooltip_text="Rename this blog")
             rename.connect("clicked", self._on_rename, src)
             row.add_suffix(rename)
+
+            if src["plugin"] != "epub":          # books always import whole
+                limit_btn = Gtk.Button(
+                    icon_name="view-list-symbolic", valign=Gtk.Align.CENTER,
+                    css_classes=["flat"],
+                    tooltip_text="Choose how many recent posts to follow")
+                limit_btn.connect("clicked", self._on_limit, src, limit)
+                row.add_suffix(limit_btn)
 
             sync_btn = Gtk.Button(icon_name="view-refresh-symbolic",
                                   valign=Gtk.Align.CENTER, css_classes=["flat"],
@@ -301,6 +331,28 @@ class SourcesView(Gtk.Box):
         dialog.present(self.window)
         entry.grab_focus()
 
+    def _on_limit(self, _btn, src, current) -> None:
+        dialog = Adw.AlertDialog(
+            heading=f"Posts to follow for {src['name']}",
+            body="Chronicle fetches this many of the newest posts. Lowering "
+                 "it never deletes anything you already have; to go further "
+                 "back, raise it and run a Full archive scan.")
+        editor, chosen = _limit_editor(current)
+        dialog.set_extra_child(editor)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("save", "Save")
+        dialog.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("save")
+
+        def done(_d, response):
+            if response == "save":
+                db.set_source_limit(self.get_conn(), src["id"], chosen())
+                self.reload()
+                self.emit("library-changed")
+
+        dialog.connect("response", done)
+        dialog.present(self.window)
+
     def _on_remove(self, _btn, src) -> None:
         conn = self.get_conn()
         count = conn.execute("SELECT COUNT(*) c FROM articles WHERE source_id=?",
@@ -384,7 +436,11 @@ class SourcesView(Gtk.Box):
                  "its archive — a REST API, a sitemap, or a feed.")
         entry = Gtk.Entry(placeholder_text="https://example.com",
                           input_purpose=Gtk.InputPurpose.URL, activates_default=True)
-        dialog.set_extra_child(entry)
+        editor, chosen = _limit_editor(sources.DEFAULT_LIMIT)
+        form = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        form.append(entry)
+        form.append(editor)
+        dialog.set_extra_child(form)
         dialog.add_response("cancel", "Cancel")
         dialog.add_response("add", "Add")
         dialog.set_response_appearance("add", Adw.ResponseAppearance.SUGGESTED)
@@ -395,19 +451,20 @@ class SourcesView(Gtk.Box):
             text = entry.get_text().strip()
             dialog.set_response_enabled("add", len(text) > 3)
         entry.connect("changed", on_changed)
-        dialog.connect("response", self._on_add_response, entry)
+        dialog.connect("response", self._on_add_response, entry, chosen)
         dialog.present(self.window)
         entry.grab_focus()
 
-    def _on_add_response(self, dialog, response, entry) -> None:
+    def _on_add_response(self, dialog, response, entry, chosen) -> None:
         if response != "add":
             return
         url = entry.get_text().strip()
         toast = Adw.Toast(title=GLib.markup_escape_text(f"Inspecting {url}…"), timeout=3)
         self.window.toasts.add_toast(toast)
-        threading.Thread(target=self._detect_and_add, args=(url,), daemon=True).start()
+        threading.Thread(target=self._detect_and_add, args=(url, chosen()),
+                         daemon=True).start()
 
-    def _detect_and_add(self, url: str) -> None:
+    def _detect_and_add(self, url: str, limit: int | None = None) -> None:
         try:
             spec = sources.detect(url)
         except Exception as exc:                      # noqa: BLE001
@@ -419,6 +476,8 @@ class SourcesView(Gtk.Box):
             .replace("www.", "").replace(".", "-")
         config = dict(spec.get("config") or {})
         config["detected"] = spec["detected"]
+        if limit is not None:
+            config["limit"] = limit
         try:
             db.add_source(conn, slug, spec["name"], spec["plugin"],
                           spec["homepage"], config)
