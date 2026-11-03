@@ -360,6 +360,16 @@ class Syncer:
                     if r["id"] not in have:
                         pending.append((r["id"], r["url"], None, None, {}))
             self._fetch_bodies(conn, source, ctx, row, pending, prog, cache_images)
+            # A source may need to know the whole job went through (a book
+            # records that its file has been taken in, and drops chapters the
+            # file no longer has). Never after a cancelled run.
+            finish = getattr(source, "finish", None)
+            if finish is not None and not self.should_stop():
+                try:
+                    finish(conn, ctx)
+                except Exception:                     # noqa: BLE001
+                    log.error("finish failed for %s: %s", row["slug"],
+                              traceback.format_exc())
 
         net.set_rate_scale(1.0)
         status = "stopped" if self.should_stop() else "ok"

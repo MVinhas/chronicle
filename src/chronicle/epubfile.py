@@ -20,16 +20,23 @@ the file, so it is treated as untrusted input:
 * DRM-protected books are refused. Chronicle does not remove DRM.
 
 Chapters come from the nav document (EPUB 3), else the NCX (EPUB 2), else the
-spine order. One chapter per table-of-contents document: nested entries that
-point into the same file are part of it, spine files the contents never name
-continue the chapter before them, and pure front matter (cover, title page,
-copyright, contents page) is skipped.
+spine order. One chapter per top-level table-of-contents entry. Where several top-level
+entries point into one file (a Project Gutenberg book is a handful of big
+files with hundreds of #anchors) the file is cut at those anchors, before the
+ids are stripped. Entries nested below a top-level one in the same file are
+part of it; nested entries in files of their own are chapters of their own.
+Spine files the contents never name continue the chapter before them, and
+pure front matter (cover, title page, copyright, contents page) is skipped:
+a name, epub:type or guide entry only makes a page suspect, and short or
+link-only text then confirms it.
 """
 from __future__ import annotations
 
 import hashlib
+import os
 import posixpath
 import re
+import shutil
 import threading
 import zipfile
 from xml.parsers import expat
@@ -37,7 +44,8 @@ from dataclasses import dataclass, field
 from urllib.parse import unquote, urlparse
 from xml.etree import ElementTree as ET
 
-from bs4 import Comment, Declaration, Doctype, ProcessingInstruction, Tag
+from bs4 import (Comment, Declaration, Doctype, NavigableString,
+                 ProcessingInstruction, Tag)
 from bs4.dammit import UnicodeDammit
 
 from . import htmlutil, mathml
@@ -47,6 +55,7 @@ MAX_ENTRY_BYTES = 64_000_000          # one uncompressed member
 MAX_TOTAL_BYTES = 1_000_000_000       # all members, as declared
 MAX_TEXT_BYTES = 16_000_000           # one XML/XHTML member
 MAX_READ_BYTES = 200_000_000          # decompressed bytes read for one book
+FRONT_MAX_WORDS = 150                 # longer than this is never "just" front matter
 MAX_NEST = 200                        # element nesting in a chapter
 MAX_RATIO = 200                       # uncompressed : compressed ...
 RATIO_FLOOR = 1_000_000               # ... but only past this size
@@ -86,6 +95,10 @@ class Chapter:
     title: str
     html: str                  # sanitised reader HTML
     order: int = 0
+    key: str = ""              # identity in the book: href, or href#anchor
+
+    def __post_init__(self):
+        self.key = self.key or self.href
 
 
 @dataclass
@@ -133,6 +146,47 @@ def file_sha256(path: str) -> str:
     except OSError as exc:
         raise EpubError(f"Cannot read {path}: {exc.strerror or exc}") from None
     return h.hexdigest()
+
+
+def store_copy(src: str, digest: str) -> str:
+    """Copy a book into the library (books/<sha256>.epub); return the path.
+
+    The library keeps its own copy so a book survives the original being
+    moved, deleted or (under Flatpak) reachable only through a session-bound
+    document-portal path. Idempotent: an existing copy is reused.
+    """
+    from . import paths
+    target = paths.BOOK_DIR / f"{digest}.epub"
+    if target.exists():
+        return str(target)
+    try:
+        paths.BOOK_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(f".{digest}.{os.getpid()}.{threading.get_ident()}.tmp")
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, target)
+    except FileNotFoundError:
+        raise EpubError(f"Book file not found: {src}") from None
+    except OSError as exc:
+        raise EpubError(f"Cannot copy {src} into the library: "
+                        f"{exc.strerror or exc}") from None
+    return str(target)
+
+
+def prune_copies(keep: set[str]) -> int:
+    """Delete library copies no source refers to (paths in `keep` stay)."""
+    from . import paths
+    removed = 0
+    if not paths.BOOK_DIR.is_dir():
+        return 0
+    wanted = {os.path.realpath(k) for k in keep}
+    for f in paths.BOOK_DIR.glob("*.epub"):
+        if os.path.realpath(f) not in wanted:
+            try:
+                f.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed
 
 
 # -- zip safety -----------------------------------------------------------
@@ -314,18 +368,22 @@ def _build(zf, names, path, opf_path, opf) -> Book:
             if (item and item[0] in names and item[0] not in spine
                     and ("xhtml" in item[1] or item[1] == "text/html")):
                 spine.append(item[0])
+    if not spine:
+        raise EpubError("This book has no readable chapters (empty reading "
+                        "order)")
 
-    toc: list[tuple[str, str]] = []          # (zip path, title)
+    toc: list[_Entry] = []
     front: set[str] = set()
     nav = next((h for h, _m, p in manifest.values() if "nav" in p), None)
-    ncx = None
+    ncx_candidates = []
     if spine_el is not None and spine_el.get("toc") in manifest:
-        ncx = manifest[spine_el.get("toc")][0]
-    ncx = ncx or next((h for h, m, _p in manifest.values()
-                       if m == "application/x-dtbncx+xml"), None)
+        ncx_candidates.append(manifest[spine_el.get("toc")][0])
+    ncx_candidates += [h for h, m, _p in manifest.values()
+                       if m == "application/x-dtbncx+xml"]
+    ncx = next((c for c in ncx_candidates if c in names), None)
     if nav and nav in names:
         toc, front = _read_nav(zf, nav)
-    if not toc and ncx and ncx in names:
+    if not toc and ncx:
         toc = _read_ncx(zf, ncx)
     guide = _first(opf, "guide")
     if guide is not None:
@@ -335,35 +393,41 @@ def _build(zf, names, path, opf_path, opf) -> Book:
                 if target:
                     front.add(target)
 
-    titles: dict[str, str] = {}
-    for href, title in toc:
-        titles.setdefault(href, title)
+    by_doc: dict[str, list[_Entry]] = {}
+    for e in toc:
+        by_doc.setdefault(e.href, []).append(e)
 
-    spine_set = set(spine)
     chapters: list[Chapter] = []
     for doc in spine:
+        entries = by_doc.get(doc, [])
+        # One chapter per top-level entry: where a file holds several
+        # top-level entries (one big file, a contents of #anchors) it is cut
+        # at them; deeper entries only count in files that have no shallower
+        # one (a part page listing chapter files of their own).
+        if entries:
+            top = min(e.depth for e in entries)
+            entries = [e for e in entries if e.depth == top]
         raw = _read(zf, doc, MAX_TEXT_BYTES)
-        body, doc_title, heading, types = _prepare(raw, doc, names)
-        title = titles.get(doc) or ""
-        is_front = (doc in front or bool(types & _FRONT_TYPES)
-                    or bool(_FRONT_STEM.match(
-                        posixpath.splitext(posixpath.basename(doc))[0].lower()))
-                    or bool(_FRONT_TITLE.match(title or heading or doc_title or "")))
-        continuation = bool(toc) and doc not in titles and chapters and not is_front
-        if is_front:
-            continue
-        if body is None:
-            continue
-        title = title or heading or doc_title
-        html = _render(body, title)
-        if not html:
-            continue
-        if continuation:
-            chapters[-1].html += html
-            continue
-        chapters.append(Chapter(doc, title or f"Part {len(chapters) + 1}", html))
+        pieces, doc_title, types = _prepare(raw, doc, names, entries)
+        for piece in pieces:
+            if _is_front(piece, doc, doc_title, front, types, nav):
+                continue
+            label = piece.title or piece.heading or doc_title
+            continuation = (bool(toc) and not piece.from_toc
+                            and bool(chapters))
+            # A continuation keeps its own heading: it is not the chapter's
+            # title repeated, it is the next part of the chapter.
+            html = _render(piece.body, "" if continuation else label)
+            if not html:
+                continue
+            if continuation:
+                chapters[-1].html += html
+                continue
+            chapters.append(Chapter(
+                doc, label or f"Part {len(chapters) + 1}", html,
+                key=f"{doc}#{piece.frag}" if piece.frag else doc))
 
-    if not chapters and spine_set:
+    if not chapters:
         raise EpubError("This book has no readable chapters")
     for i, ch in enumerate(chapters):
         ch.order = i
@@ -373,43 +437,106 @@ def _build(zf, names, path, opf_path, opf) -> Book:
     return book
 
 
-def _read_nav(zf, nav_path: str) -> tuple[list[tuple[str, str]], set[str]]:
+def _is_front(piece: "_Piece", doc: str, doc_title: str, front: set[str],
+              types: set[str], nav: str | None) -> bool:
+    """Is this piece cover/title/copyright/contents rather than the book?
+
+    Names, types and guide entries only raise suspicion; the text decides. A
+    page of real prose stays whatever it is called, and a page the table of
+    contents gives a real title is never judged by its file name.
+    """
+    if doc == nav and not piece.from_toc:
+        return True
+    label = piece.title or piece.heading or doc_title or ""
+    explicit = bool(piece.title) and not _FRONT_TITLE.match(piece.title)
+    stem = posixpath.splitext(posixpath.basename(doc))[0].lower()
+    suspect = (doc in front or bool(types & _FRONT_TYPES)
+               or bool(_FRONT_TITLE.match(label))
+               or (not explicit and not piece.frag
+                   and bool(_FRONT_STEM.match(stem))))
+    if not suspect:
+        return False
+    if piece.link_fraction >= 0.5 and piece.words:
+        return True                    # a contents list, however long
+    return piece.words < FRONT_MAX_WORDS
+
+
+@dataclass
+class _Entry:
+    href: str          # zip path of the document
+    frag: str          # anchor within it, "" for the whole file
+    title: str
+    depth: int = 0
+
+
+@dataclass
+class _Piece:
+    """A chapter-sized slice of one document."""
+    body: object
+    title: str = ""            # from the table of contents; "" if none
+    frag: str = ""
+    from_toc: bool = False
+    heading: str = ""
+    words: int = 0
+    link_fraction: float = 0.0
+
+
+def _target(base: str, ref: str) -> tuple[str | None, str]:
+    path, _, frag = (ref or "").partition("#")
+    return _resolve(base, path), unquote(frag)
+
+
+def _read_nav(zf, nav_path: str) -> tuple[list[_Entry], set[str]]:
     soup = htmlutil.parse(_decode(_read(zf, nav_path, MAX_TEXT_BYTES)))
-    toc: list[tuple[str, str]] = []
+    if _depth(soup) > MAX_NEST:
+        raise EpubError("Refusing this file: its navigation is nested "
+                        "implausibly deep")
+    toc: list[_Entry] = []
     front: set[str] = set()
     navs = soup.find_all("nav")
     toc_nav = next((n for n in navs
                     if "toc" in (n.get("epub:type") or "").split()), None)
-    if toc_nav is None and navs:
-        toc_nav = next((n for n in navs
-                        if "landmarks" not in (n.get("epub:type") or "")), None)
+    if toc_nav is None:
+        # An untyped <nav> is the contents; a page-list or landmarks is not.
+        toc_nav = next((n for n in navs if not n.get("epub:type")), None)
     if toc_nav is not None:
         for a in toc_nav.find_all("a"):
-            href = _resolve(nav_path, (a.get("href") or "").split("#")[0])
+            href, frag = _target(nav_path, a.get("href") or "")
             text = " ".join(a.get_text(" ", strip=True).split())
             if href and text:
-                toc.append((href, text))
+                depth = sum(1 for p in a.parents
+                            if p is not toc_nav and p.name in ("ol", "ul"))
+                toc.append(_Entry(href, frag, text, max(0, depth - 1)))
     for n in navs:
         if "landmarks" in (n.get("epub:type") or ""):
             for a in n.find_all("a"):
                 if set((a.get("epub:type") or "").split()) & _FRONT_TYPES:
-                    href = _resolve(nav_path, (a.get("href") or "").split("#")[0])
+                    href, _frag = _target(nav_path, a.get("href") or "")
                     if href:
                         front.add(href)
     return toc, front
 
 
-def _read_ncx(zf, ncx_path: str) -> list[tuple[str, str]]:
+def _read_ncx(zf, ncx_path: str) -> list[_Entry]:
     root = _xml(_read(zf, ncx_path, MAX_TEXT_BYTES))
-    out = []
-    for point in _all(root, "navPoint"):
-        label = _first(point, "navLabel")
-        content = _first(point, "content")
-        text = " ".join(("".join(label.itertext()) if label is not None else "").split())
-        href = _resolve(ncx_path, (content.get("src") or "").split("#")[0]
-                        ) if content is not None else None
-        if href and text:
-            out.append((href, text))
+    out: list[_Entry] = []
+    # Document order with depth, without recursion.
+    stack = [(root, -1)]
+    while stack:
+        el, depth = stack.pop()
+        is_point = _local(el) == "navPoint"
+        if is_point:
+            label = next((c for c in el if _local(c) == "navLabel"), None)
+            content = next((c for c in el if _local(c) == "content"), None)
+            text = " ".join(("".join(label.itertext()) if label is not None
+                             else "").split())
+            href, frag = (_target(ncx_path, content.get("src") or "")
+                          if content is not None else (None, ""))
+            if href and text:
+                out.append(_Entry(href, frag, text, depth))
+        for child in reversed(list(el)):
+            if isinstance(child.tag, str):
+                stack.append((child, depth + 1 if is_point else depth))
     return out
 
 
@@ -431,28 +558,129 @@ def _depth(root) -> int:
     return deepest
 
 
-def _prepare(raw: bytes, doc: str, names: set[str]):
-    """Parse one chapter document and neutralise it for the sanitiser.
+def _text_len(node) -> int:
+    return len(node.get_text(" ", strip=True))
 
-    Returns (body, <title>, first heading, epub:type values).
+
+def _covering_types(body, soup) -> set[str]:
+    """epub:type values that describe (nearly) the whole file.
+
+    A `titlepage` section at the top of a one-file book, or a small `toc` div
+    opening a chapter, labels a part of the file, not the file.
+    """
+    types = set((body.get("epub:type") or "").split()) if body is not soup else set()
+    total = max(1, _text_len(body))
+    for sec in body.find_all(["section", "div"], recursive=False):
+        mine = set((sec.get("epub:type") or "").split())
+        if mine and _text_len(sec) >= 0.8 * total:
+            types |= mine
+    return types
+
+
+def _prepare(raw: bytes, doc: str, names: set[str], entries=()):
+    """Parse one document, cut it into chapter pieces, neutralise each.
+
+    `entries` are the table-of-contents entries to cut at (those pointing
+    into this file). Returns (pieces, <title>, covering epub:type values).
     """
     soup = htmlutil.parse(_decode(raw))
     body = soup.body or soup
     if _depth(body) > MAX_NEST:
         raise EpubError("Refusing this file: a chapter is nested "
                         "implausibly deep")
-    types = set((body.get("epub:type") or "").split())
-    for sec in body.find_all(["section", "div"], recursive=False):
-        types |= set((sec.get("epub:type") or "").split())
+    types = _covering_types(body, soup)
     doc_title = ""
     if soup.title:
         doc_title = " ".join(soup.title.get_text(" ", strip=True).split())
     for junk in body.find_all(string=lambda s: isinstance(
             s, (Comment, Declaration, Doctype, ProcessingInstruction))):
         junk.extract()
-    h = body.find(["h1", "h2", "h3"])
-    heading = " ".join(h.get_text(" ", strip=True).split()) if h else ""
 
+    # Cut before anything strips the ids the table of contents points at.
+    start_title, cuts = None, []              # cuts: (position, tag, entry)
+    if entries:
+        anchors = {}
+        for tag in body.find_all(True):
+            for key in (tag.get("id"), tag.get("name") if tag.name == "a" else None):
+                if key:
+                    anchors.setdefault(key, tag)
+        order = {id(t): i for i, t in enumerate(body.find_all(True))}
+        seen = set()
+        for e in entries:
+            tag = anchors.get(e.frag) if e.frag else None
+            if tag is None or tag is body:
+                if start_title is None:
+                    start_title = e.title
+            elif id(tag) not in seen:
+                seen.add(id(tag))
+                cuts.append((order[id(tag)], tag, e))
+        cuts.sort(key=lambda c: c[0])
+    if cuts:
+        roots = _split(soup, body, [c[1] for c in cuts])
+    else:
+        roots = [body]
+    pieces = []
+    for i, root in enumerate(roots):
+        if i == 0:
+            piece = _Piece(root, title=start_title or "",
+                           from_toc=start_title is not None)
+        else:
+            e = cuts[i - 1][2]
+            piece = _Piece(root, title=e.title, frag=e.frag, from_toc=True)
+        h = root.find(["h1", "h2", "h3"])
+        piece.heading = " ".join(h.get_text(" ", strip=True).split()) if h else ""
+        total = _text_len(root)
+        linked = sum(_text_len(a) for a in root.find_all("a")
+                     if (a.get("href") or "").strip())
+        piece.words = len(root.get_text(" ", strip=True).split())
+        piece.link_fraction = min(1.0, linked / total) if total else 0.0
+        if i == 0 and not (piece.words or root.find("img")) and cuts:
+            continue                          # nothing before the first cut
+        _neutralise(root, doc, names)
+        pieces.append(piece)
+    return pieces, doc_title, types
+
+
+def _split(soup, body, cut_tags) -> list:
+    """Cut `body` into len(cut_tags)+1 containers at the given elements.
+
+    Each container is a fresh <div> holding clones of the ancestors it needs
+    around the content that falls in its range, so wrapping markup (a
+    `<div class=chapter>` around a heading) survives in every piece. One pass
+    over the tree; ancestors are cloned lazily, so cost is linear in size.
+    """
+    cutset = {id(t) for t in cut_tags}
+    roots = [soup.new_tag("div")]
+    maps = [{id(body): roots[0]}]
+
+    def clone_in(i, node):
+        got = maps[i].get(id(node))
+        if got is None:
+            parent = clone_in(i, node.parent)
+            got = soup.new_tag(node.name, attrs=dict(node.attrs))
+            parent.append(got)
+            maps[i][id(node)] = got
+        return got
+
+    cur = 0
+    stack = list(reversed(body.contents))
+    while stack:
+        node = stack.pop()
+        if id(node) in cutset:
+            cur += 1
+            roots.append(soup.new_tag("div"))
+            maps.append({id(body): roots[cur]})
+        if isinstance(node, Tag) and node.contents:
+            stack.extend(reversed(node.contents))
+            continue
+        leaf = (soup.new_tag(node.name, attrs=dict(node.attrs))
+                if isinstance(node, Tag) else NavigableString(str(node)))
+        clone_in(cur, node.parent).append(leaf)
+    return roots
+
+
+def _neutralise(body, doc: str, names: set[str]) -> None:
+    """Make one piece safe and offline for the sanitiser."""
     # Math first, while the MathML elements are still intact.
     for m in body.find_all(lambda t: (t.name or "").split(":")[-1] == "math"):
         tag = "div" if m.get("display") == "block" else "span"
@@ -493,7 +721,6 @@ def _prepare(raw: bytes, doc: str, names: set[str]):
         for attr in ("class", "id", "style"):
             if attr in tag.attrs:
                 del tag[attr]
-    return body, doc_title, heading, types
 
 
 def _render(body, title: str) -> str:

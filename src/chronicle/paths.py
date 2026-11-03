@@ -28,12 +28,14 @@ else:
 
 DB_PATH = DATA_DIR / "library.db"
 IMAGE_DIR = DATA_DIR / "images"
+BOOK_DIR = DATA_DIR / "books"          # copies of imported EPUB files
 HTTP_CACHE_DIR = CACHE_DIR / "http"
 LOG_PATH = CACHE_DIR / "chronicle.log"
 
 
 def ensure_dirs() -> None:
-    for d in (DATA_DIR, CACHE_DIR, CONFIG_DIR, IMAGE_DIR, HTTP_CACHE_DIR):
+    for d in (DATA_DIR, CACHE_DIR, CONFIG_DIR, IMAGE_DIR, BOOK_DIR,
+              HTTP_CACHE_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 
