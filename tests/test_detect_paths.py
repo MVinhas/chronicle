@@ -185,3 +185,32 @@ class TestWorksInProgress(SyncHarness):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SlowSiteProbeTests(unittest.TestCase):
+    """A site that asks for slow crawling must not be probed with guesses."""
+
+    def test_looks_wordpress(self):
+        from chronicle import sources
+        self.assertTrue(sources._looks_wordpress('<link href="/wp-content/x.css">'))
+        self.assertFalse(sources._looks_wordpress("<html><body>hi</body></html>"))
+        self.assertFalse(sources._looks_wordpress(None))
+
+    def test_listed_only_skips_guessed_sitemaps(self):
+        from unittest import mock
+        from chronicle import net, sources
+        seen = []
+
+        def fake_fetch(url, *a, **k):
+            seen.append(url)
+            raise net.FetchError(url, 404, "not found")
+
+        with mock.patch.object(net, "fetch", fake_fetch), \
+                mock.patch.object(net, "fetch_text", fake_fetch):
+            sources._find_sitemap("https://slow.example", listed_only=True)
+            only_listed = [u for u in seen if "sitemap" in u and "robots" not in u]
+            seen.clear()
+            sources._find_sitemap("https://slow.example", listed_only=False)
+            guessed = [u for u in seen if "sitemap" in u and "robots" not in u]
+        self.assertEqual(only_listed, [])
+        self.assertGreaterEqual(len(guessed), 3)

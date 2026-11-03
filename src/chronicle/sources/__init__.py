@@ -208,6 +208,11 @@ def detect(url: str) -> dict:
     wp_paths = _WP_PATHS[:1] if is_section else _WP_PATHS
     if is_section and not _is_subsite_api(api_base):
         wp_paths = ()
+    # A site that asks for slow crawling and shows no trace of WordPress would
+    # cost one slow request per guess; the first, cheap probe is enough there.
+    slow = net.crawl_delay_for(base) > 2
+    if slow and not _looks_wordpress(home_html):
+        wp_paths = wp_paths[:1]
     for path in wp_paths:
         try:
             resp = net.fetch(api_base + path, headers={"Accept": "application/json"},
@@ -250,8 +255,8 @@ def detect(url: str) -> dict:
     # 4. No API. The generic source merges every remaining route — sitemap,
     #    archive pages, feed — so detection just records where a sitemap is
     #    (robots.txt first, then convention) to save the first sync a probe.
-    sitemap, absent = _find_sitemap(base)
-    if absent:
+    sitemap, absent = _find_sitemap(base, listed_only=slow)
+    if absent and not slow:
         # Every probe said 404: remember it, so the first sync skips them.
         # (A timeout or 5xx proves nothing, and records nothing.)
         from datetime import date
@@ -318,12 +323,19 @@ def _feed_link_from(base: str, html: str | None) -> str | None:
     return None
 
 
-def _find_sitemap(base: str) -> tuple[str | None, bool]:
+def _looks_wordpress(html: str | None) -> bool:
+    low = (html or "").lower()
+    return any(m in low for m in ("wp-content", "wp-json", "api.w.org", "wp-includes"))
+
+
+def _find_sitemap(base: str, listed_only: bool = False) -> tuple[str | None, bool]:
     """Where the site's sitemap lives, if anywhere — existence check only.
 
     Returns (hint, absent): `absent` is True only when every candidate gave a
     definite 404/410 (or a page that is not a sitemap)."""
-    hints = discovery.robots_sitemaps(base) + list(discovery.SITEMAP_HINTS)
+    hints = discovery.robots_sitemaps(base)
+    if not listed_only:
+        hints += list(discovery.SITEMAP_HINTS)
     transient = False
     for hint in hints:
         target = hint if hint.startswith("http") else base + hint

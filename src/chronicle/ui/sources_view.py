@@ -463,8 +463,13 @@ class SourcesView(Gtk.Box):
         if response != "add":
             return
         url = entry.get_text().strip()
-        toast = Adw.Toast(title=GLib.markup_escape_text(f"Inspecting {url}…"), timeout=3)
+        # timeout=0 keeps the toast up until the add finishes: a site that
+        # asks for slow crawling can take over a minute to inspect, and a
+        # message that vanishes after 3 s looks like nothing is happening.
+        toast = Adw.Toast(title=GLib.markup_escape_text(
+            f"Inspecting {url}… this can take a minute on slow sites"), timeout=0)
         self.window.toasts.add_toast(toast)
+        self._inspecting = toast
         threading.Thread(target=self._detect_and_add, args=(url, chosen()),
                          daemon=True).start()
 
@@ -493,6 +498,10 @@ class SourcesView(Gtk.Box):
         GLib.idle_add(self._added, spec, None)
 
     def _added(self, spec, error, kind: str = "blog") -> bool:
+        pending = getattr(self, "_inspecting", None)
+        if pending is not None:
+            pending.dismiss()
+            self._inspecting = None
         if error or spec is None:
             self.window.toasts.add_toast(
                 Adw.Toast(title=GLib.markup_escape_text(f"Could not add that {kind}: {error}"), timeout=6))

@@ -352,6 +352,12 @@ def apply_crawl_delay(url: str) -> None:
         _limiter.min_gap.pop(host, None)
 
 
+def crawl_delay_for(url: str) -> float:
+    """The Crawl-delay (seconds) a site asked for, 0 if none is known."""
+    host = _bare(urllib.parse.urlparse(url).netloc)
+    return _limiter.min_gap.get(host, 0.0)
+
+
 def reset_crawl_delays() -> None:
     _crawl_checked.clear()
     _limiter.min_gap.clear()
