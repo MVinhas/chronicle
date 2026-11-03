@@ -308,3 +308,55 @@ class TestFeedHosts(SyncHarness):
         run_sync(fn, self.dbfile, spec=_SPEC)
         self.assertEqual(len(self.urls()), 0)
         self.assertEqual(fn.count("unsung"), 0)
+
+
+class TestHintExpiry(SyncHarness):
+    def _site(self):
+        fn = FakeNet()
+        _home(fn)
+        urls = []
+        for i in range(6):
+            u = f"{BASE}/p-{i}/"
+            fn.add(u, post_html(f"P{i}", f"2026-0{1 + i}-10T00:00:00+00:00"))
+            urls.append(u)
+        fn.add(BASE + "/feed/", _rss([]))
+        return fn, urls
+
+    def _cfg(self):
+        c = self.conn()
+        cfg = json.loads(c.execute("SELECT config FROM sources").fetchone()[0])
+        c.close()
+        return cfg
+
+    def test_a_transient_sitemap_failure_never_writes_an_empty_hint(self):
+        from fakesite import sitemap_xml
+        fn, urls = self._site()
+        spec = dict(_SPEC, config={"sitemap": BASE + "/sitemap.xml"})
+        fn.add(BASE + "/sitemap.xml", "boom", status=503)
+        run_sync(fn, self.dbfile, spec=spec)
+        self.assertEqual(self._cfg().get("sitemap"), BASE + "/sitemap.xml")
+        fn.add(BASE + "/sitemap.xml", sitemap_xml(urls))
+        fn.requests.clear()
+        run_sync(fn, self.dbfile, spec=spec)
+        self.assertGreater(fn.count("sitemap.xml"), 0)
+        self.assertEqual(len(self.urls()), 6)
+
+    def test_when_every_probe_404s_the_absence_is_remembered_then_expires(self):
+        fn, _ = self._site()
+        run_sync(fn, self.dbfile, spec=_SPEC)
+        self.assertEqual(self._cfg().get("sitemap"), "")
+        self.assertTrue(self._cfg().get("hints_checked"))
+        fn.requests.clear()
+        run_sync(fn, self.dbfile, spec=_SPEC)
+        self.assertEqual(fn.count("sitemap"), 0)
+        # A week later the answer is asked again.
+        c = self.conn()
+        cfg = self._cfg()
+        cfg["hints_checked"] = "2020-01-01"
+        c.execute("UPDATE sources SET config=?", (json.dumps(cfg),))
+        c.commit()
+        c.close()
+        fn.requests.clear()
+        run_sync(fn, self.dbfile, spec=_SPEC)
+        self.assertGreater(fn.count("sitemap"), 0)
+        self.assertNotEqual(self._cfg()["hints_checked"], "2020-01-01")

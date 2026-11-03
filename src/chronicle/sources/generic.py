@@ -69,11 +69,6 @@ class GenericSource(Source):
                 ctx.say(f"{self.name}: {len(sitemap_urls)} pages in sitemap")
             if sitemap_src and sitemap_src != self.config.get("sitemap"):
                 ctx.config_updates["sitemap"] = sitemap_src
-            elif (not sitemap_src and homepage_html
-                  and self.config.get("sitemap") != ""):
-                # None found: remember it, as with the feed and the index, so
-                # a full scan does not pay six requests to learn it again.
-                ctx.config_updates["sitemap"] = ""
 
         # 3. Archive pages: always consulted — the site's own listing is both
         #    an enumeration and, on many blogs, the only place dates appear.
@@ -96,6 +91,15 @@ class GenericSource(Source):
         if ((index or homepage_html)
                 and self.config.get("index") != (index or "")):
             ctx.config_updates["index"] = index or ""
+
+        # Absence hints ("" = looked, none) are believed for a week; stamp the
+        # check so they expire and are asked again.
+        held = {**self.config, **ctx.config_updates}
+        if (any(held.get(k) == "" for k in ("feed", "sitemap", "index"))
+                and (not discovery.hints_fresh(self.config)
+                     or "hints_checked" in ctx.config_updates)):
+            from datetime import date
+            ctx.config_updates["hints_checked"] = date.today().isoformat()
 
         pool = discovery.merge(feed_items, sitemap_urls, archive_entries,
                                self.in_scope, host=urlparse(base).netloc)

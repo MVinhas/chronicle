@@ -193,11 +193,30 @@ def _looks_like_article(soup, extracted_html: str | None = None) -> bool:
 # enumerators
 # --------------------------------------------------------------------------
 
+HINT_TTL_DAYS = 7
+
+
+def hints_fresh(config: dict) -> bool:
+    """Is an empty hint ("looked, there is none") recent enough to believe?
+
+    Absence is only remembered for a week: a site can add a sitemap or a feed,
+    and a probe that failed for any other reason than a 404 must not become a
+    permanent verdict. Legacy empty hints without a stamp count as stale and
+    are re-checked once.
+    """
+    from datetime import date
+    try:
+        stamp = date.fromisoformat(str(config.get("hints_checked") or ""))
+    except ValueError:
+        return False
+    return (date.today() - stamp).days < HINT_TTL_DAYS
+
+
 def find_feed_url(base: str, homepage_html: str | None, config: dict,
                   ctx) -> str | None:
     # An empty stored hint means "looked for one before, there is none" —
     # recorded so every sync does not re-probe eight conventional paths.
-    if "feed" in config:
+    if "feed" in config and (config["feed"] or hints_fresh(config)):
         # A recipe may pin a site-relative path ("/rss.xml").
         return net.absolutise(base + "/", config["feed"]) if config["feed"] else None
     if homepage_html:
@@ -331,9 +350,10 @@ def read_sitemaps(base: str, config: dict, ctx) -> tuple[list[str], str | None]:
         yield from robots_sitemaps(base)
         yield from SITEMAP_HINTS
 
-    if config.get("sitemap") == "":
+    if config.get("sitemap") == "" and hints_fresh(config):
         return [], None          # looked before: this site publishes none
     tried: set[str] = set()
+    transient = False
     for hint in hints():
         url = hint if hint.startswith("http") else base + hint
         if url in tried:
@@ -342,13 +362,19 @@ def read_sitemaps(base: str, config: dict, ctx) -> tuple[list[str], str | None]:
         ctx.check()
         try:
             xml = net.fetch_text(url, timeout=60, max_bytes=40_000_000)
-        except net.FetchError:
+        except net.FetchError as exc:
+            # Only a definite "no such page" is evidence of absence; a 503 or
+            # a timeout says nothing about whether the sitemap exists.
+            if exc.status not in (404, 410):
+                transient = True
             continue
         if "<urlset" not in xml[:2000] and "<sitemapindex" not in xml[:2000]:
             continue
         urls = _collect_sitemap(xml, ctx, depth=0)
         if urls:
             return urls, hint
+    if not transient:
+        ctx.config_updates["sitemap"] = ""
     return [], None
 
 
@@ -409,7 +435,7 @@ def read_archive(base: str, config: dict, ctx, in_scope,
     root) widen the scope to exactly what it listed -- without which every
     such source discovers nothing at all.
     """
-    if config.get("index") == "":
+    if config.get("index") == "" and hints_fresh(config):
         return [], None   # looked before: this site keeps no archive index
     configured = config.get("index") or None
     paths = ((configured,) if configured else ()) + ARCHIVE_PATHS
