@@ -39,13 +39,19 @@ def chapter_body(title: str, words: int = 60) -> str:
 
 
 def make_epub(path, chapters, toc="nav", images_=None, extra=None,
-              guide=None, opf_extra="", title="The Test Book"):
-    """chapters: list of (id, filename, toc_title|None, body, body_attrs)."""
+              guide=None, opf_extra="", title="The Test Book", repeat=None,
+              toc_entries=None, nav_extra="", spine_toc="ncx"):
+    """chapters: list of (id, filename, toc_title|None, body, body_attrs).
+
+    repeat: {idref: n} lists that itemref n times in the spine.
+    toc_entries: [(href[#frag], title, depth)] replacing the entries derived
+    from the chapters' titles. nav_extra: more <nav> elements in the nav file.
+    """
     items, spine = [], []
     for cid, fn, _t, _b, *_ in chapters:
         items.append(f'<item id="{cid}" href="{fn}" '
                      'media-type="application/xhtml+xml"/>')
-        spine.append(f'<itemref idref="{cid}"/>')
+        spine.extend([f'<itemref idref="{cid}"/>'] * (repeat or {}).get(cid, 1))
     for name in (images_ or {}):
         items.append(f'<item id="img-{name}" href="{name}" media-type="image/png"/>')
     if toc == "nav":
@@ -54,7 +60,7 @@ def make_epub(path, chapters, toc="nav", images_=None, extra=None,
     elif toc == "ncx":
         items.append('<item id="ncx" href="toc.ncx" '
                      'media-type="application/x-dtbncx+xml"/>')
-    spine_attr = ' toc="ncx"' if toc == "ncx" else ""
+    spine_attr = f' toc="{spine_toc}"' if toc == "ncx" else ""
     opf = ('<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" '
            'version="3.0" unique-identifier="id"><metadata '
            'xmlns:dc="http://purl.org/dc/elements/1.1/">'
@@ -62,7 +68,8 @@ def make_epub(path, chapters, toc="nav", images_=None, extra=None,
            f'</metadata><manifest>{"".join(items)}</manifest>'
            f'<spine{spine_attr}>{"".join(spine)}</spine>{guide or ""}'
            f'{opf_extra}</package>')
-    titled = [(fn, t) for _i, fn, t, *_ in chapters if t]
+    titled = (toc_entries if toc_entries is not None
+              else [(fn, t, 0) for _i, fn, t, *_ in chapters if t])
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("mimetype", "application/epub+zip")
         z.writestr("META-INF/container.xml", CONTAINER)
@@ -70,14 +77,11 @@ def make_epub(path, chapters, toc="nav", images_=None, extra=None,
         for cid, fn, _t, body, *rest in chapters:
             z.writestr(f"OEBPS/{fn}", xhtml(_t or cid, body, *(rest or [""])))
         if toc == "nav":
-            lis = "".join(f'<li><a href="{fn}">{t}</a></li>' for fn, t in titled)
             z.writestr("OEBPS/nav.xhtml", xhtml(
-                "Nav", f'<nav epub:type="toc"><ol>{lis}</ol></nav>'))
+                "Nav", f'<nav epub:type="toc">{_nav_list(titled)}</nav>'
+                       + nav_extra))
         elif toc == "ncx":
-            pts = "".join(
-                f'<navPoint id="p{i}" playOrder="{i}"><navLabel><text>{t}</text>'
-                f'</navLabel><content src="{fn}"/></navPoint>'
-                for i, (fn, t) in enumerate(titled, 1))
+            pts = _ncx_points(titled)
             z.writestr("OEBPS/toc.ncx",
                        '<?xml version="1.0"?><ncx xmlns="http://www.daisy.org/'
                        f'z3986/2005/ncx/" version="2005-1"><navMap>{pts}</navMap></ncx>')
@@ -86,6 +90,37 @@ def make_epub(path, chapters, toc="nav", images_=None, extra=None,
         for name, data in (extra or {}).items():
             z.writestr(name, data)
     return path
+
+
+def _nav_list(entries):
+    out, depth = "<ol>", 0
+    for i, (href, t, d) in enumerate(entries):
+        while depth < d:
+            out += "<ol>"
+            depth += 1
+        while depth > d:
+            out += "</ol></li>"
+            depth -= 1
+        out += f'<li><a href="{href}">{t}</a>'
+        nxt = entries[i + 1][2] if i + 1 < len(entries) else 0
+        if nxt <= d:
+            out += "</li>"
+    while depth > 0:
+        out += "</ol></li>"
+        depth -= 1
+    return out + "</ol>"
+
+
+def _ncx_points(entries):
+    out, stack = "", []
+    for i, (href, t, d) in enumerate(entries, 1):
+        while len(stack) > d:
+            stack.pop()
+            out += "</navPoint>"
+        out += (f'<navPoint id="p{i}" playOrder="{i}"><navLabel><text>{t}'
+                f'</text></navLabel><content src="{href}"/>')
+        stack.append(i)
+    return out + "</navPoint>" * len(stack)
 
 
 def standard_chapters():
@@ -294,6 +329,109 @@ class TestSafety(TmpMixin):
         Path(self.epub).write_bytes(b"not a zip at all")
         with self.assertRaises(epubfile.EpubError):
             epubfile.open_book(self.epub)
+
+
+class TestResourceLimits(TmpMixin):
+    def test_duplicate_spine_itemrefs_are_read_once(self):
+        make_epub(self.epub, [("c", "c.xhtml", "One", chapter_body("One"))],
+                  repeat={"c": 300})
+        reads = []
+        real = epubfile._read
+
+        def counting(zf, name, limit):
+            reads.append(name)
+            return real(zf, name, limit)
+        with mock.patch.object(epubfile, "_read", counting):
+            book = epubfile.open_book(self.epub)
+        self.assertEqual(len(book.chapters), 1)
+        self.assertEqual(reads.count("OEBPS/c.xhtml"), 1)
+
+    def test_read_budget_bounds_total_decompressed_bytes(self):
+        chs = [(f"c{i}", f"c{i}.xhtml", f"T{i}", chapter_body(f"T{i}", 300))
+               for i in range(10)]
+        make_epub(self.epub, chs)
+        with mock.patch.object(epubfile, "MAX_READ_BYTES", 5_000):
+            with self.assertRaises(epubfile.EpubError):
+                epubfile.open_book(self.epub)
+
+    def test_many_small_members_cannot_declare_a_bomb(self):
+        extra = {f"OEBPS/z{i}.bin": b"\x00" * 100_000 for i in range(40)}
+        make_epub(self.epub, standard_chapters()[4:], extra=extra)
+        with self.assertRaisesRegex(epubfile.EpubError, "bomb|large"):
+            epubfile.open_book(self.epub)
+
+    def test_utf16_entity_declaration_is_refused(self):
+        evil = ('<?xml version="1.0" encoding="utf-16"?><!DOCTYPE p [<!ENTITY a '
+                '"aaaa">]><package xmlns="http://www.idpf.org/2007/opf">'
+                '<metadata/><manifest/><spine/></package>').encode("utf-16")
+        with zipfile.ZipFile(self.epub, "w") as z:
+            z.writestr("META-INF/container.xml", CONTAINER)
+            z.writestr("OEBPS/content.opf", evil)
+        with self.assertRaisesRegex(epubfile.EpubError, "entit"):
+            epubfile.open_book(self.epub)
+
+    def test_plain_doctype_without_entities_is_accepted(self):
+        make_epub(self.epub, standard_chapters()[4:], toc="ncx")
+        with zipfile.ZipFile(self.epub) as z:
+            members = {n: z.read(n) for n in z.namelist()}
+        members["OEBPS/toc.ncx"] = (
+            b'<?xml version="1.0"?><!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" '
+            b'"http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">'
+            + members["OEBPS/toc.ncx"].split(b"?>", 1)[1])
+        with zipfile.ZipFile(self.epub, "w") as z:
+            for n, d in members.items():
+                z.writestr(n, d)
+        self.assertEqual(len(epubfile.open_book(self.epub).chapters), 3)
+
+    def test_deeply_nested_math_degrades_to_text(self):
+        depth = 5000
+        src = ("<math>" + "<mrow>" * depth + "<mi>x</mi>" + "</mrow>" * depth
+               + "</math>")
+        out = mathml.to_html(htmlutil.parse(src).find("math"))
+        self.assertIn("x", out)
+
+    def test_deeply_nested_markup_is_refused(self):
+        body = "<div>" * 3000 + "<p>deep</p>" + "</div>" * 3000
+        make_epub(self.epub, [("c", "c.xhtml", "T", body)])
+        with self.assertRaisesRegex(epubfile.EpubError, "nest"):
+            epubfile.open_book(self.epub)
+
+    def test_image_bytes_are_loaded_once_per_reference(self):
+        calls = []
+
+        def load(ref):
+            calls.append(ref)
+            return PNG
+        html = '<p>' + '<img src="epub-asset:/a.png"/>' * 5 + '</p>'
+        out = images.store_assets(html, load, self.conn, "epub-asset:/", "k/")
+        self.assertEqual(calls, ["a.png"])
+        self.assertEqual(out.count(images.SCHEME + "://"), 5)
+
+    def test_asset_read_rechecks_the_archive(self):
+        make_epub(self.epub, [("c", "c.xhtml", "T", chapter_body("T"))],
+                  images_={"a.png": PNG})
+        book = epubfile.open_book(self.epub)
+        self.assertEqual(book.read_asset("OEBPS/a.png"), PNG)
+        with zipfile.ZipFile(self.epub, "a") as z:
+            z.writestr("../evil", "x")
+        self.assertIsNone(book.read_asset("OEBPS/a.png"))
+
+
+class TestRemoteReferences(TmpMixin):
+    def test_picture_sources_and_srcset_are_dropped(self):
+        body = (chapter_body("T") + '<picture><source srcset="http://evil/x.png">'
+                '<img src="a.png" srcset="http://evil/y.png 2x" alt=""/></picture>'
+                '<video poster="http://evil/p.png" src="http://evil/v.mp4"></video>'
+                '<p style="background:url(http://evil/b.png)">x</p>'
+                '<svg><use href="http://evil/s.svg#a"/></svg>'
+                '<link rel="stylesheet" href="http://evil/c.css"/>')
+        make_epub(self.epub, [("c", "c.xhtml", "T", body)],
+                  images_={"a.png": PNG})
+        html = epubfile.open_book(self.epub).chapters[0].html
+        self.assertNotIn("evil", html)
+        self.assertNotIn("srcset", html)
+        self.assertNotIn("<source", html)
+        self.assertIn("<img", html)
 
 
 class TestImages(TmpMixin):

@@ -36,7 +36,11 @@ def _text(node: Tag) -> str:
 
 
 def to_html(math: Tag) -> str:
-    out = _walk(math).strip()
+    try:
+        out = _walk(math).strip()
+    except RecursionError:
+        # Absurdly deep nesting: keep the words, lose the layout.
+        out = escape(_text(math))
     if not out:
         alt = math.get("alttext") or ""
         out = escape(alt)

@@ -107,18 +107,23 @@ def store_assets(html: str, load, conn, prefix: str, key_prefix: str) -> str:
     """
     soup = htmlutil.parse(html)
     changed = False
+    stored: dict[str, str | None] = {}       # ref -> relpath, one load each
     for img in soup.find_all("img"):
         src = img.get("src") or ""
         if not src.startswith(prefix):
             continue
         changed = True
-        body = load(src[len(prefix):])
-        sniffed = _sniff(body, "") if body else None
-        relpath = None
-        if sniffed:
-            mime, ext = sniffed
-            relpath = _persist(conn, hashlib.sha256(body).hexdigest(), mime,
-                               ext, body, key_prefix + src[len(prefix):])
+        ref = src[len(prefix):]
+        if ref not in stored:
+            body = load(ref)
+            sniffed = _sniff(body, "") if body else None
+            stored[ref] = None
+            if sniffed:
+                mime, ext = sniffed
+                stored[ref] = _persist(
+                    conn, hashlib.sha256(body).hexdigest(), mime, ext, body,
+                    key_prefix + ref)
+        relpath = stored[ref]
         if relpath:
             img["src"] = f"{SCHEME}://{relpath}"
         else:

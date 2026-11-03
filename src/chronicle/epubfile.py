@@ -6,12 +6,15 @@ the file, so it is treated as untrusted input:
 * nothing is ever extracted to disk (no zip-slip); members are read in memory
   and any member name that is absolute or climbs out with ``..`` rejects the
   whole file;
-* entry count, per-entry size, total size and compression ratio are capped,
-  and every read is bounded, so a zip bomb cannot exhaust memory;
+* entry count, per-entry size, total size and compression ratio (per member
+  and for the archive as a whole) are capped, every read is bounded, and the
+  bytes actually decompressed are totalled against a per-book budget, so a
+  zip bomb cannot exhaust memory or time;
 * XML metadata is parsed with the standard library, whose parser never loads
-  external entities, and any ``<!ENTITY`` declaration is refused outright;
+  external entities; a pre-pass with expat's own handlers refuses any entity
+  declaration or internal DTD subset whatever the file's encoding;
   chapter markup goes through the lenient HTML parser, which has no entity
-  machinery at all;
+  machinery at all, and absurdly deep nesting is refused;
 * scripts are never run, and every chapter passes through the shared
   ``htmlutil.sanitise`` before it can reach the reader;
 * DRM-protected books are refused. Chronicle does not remove DRM.
@@ -29,11 +32,12 @@ import posixpath
 import re
 import threading
 import zipfile
+from xml.parsers import expat
 from dataclasses import dataclass, field
 from urllib.parse import unquote, urlparse
 from xml.etree import ElementTree as ET
 
-from bs4 import Comment, Declaration, Doctype, ProcessingInstruction
+from bs4 import Comment, Declaration, Doctype, ProcessingInstruction, Tag
 from bs4.dammit import UnicodeDammit
 
 from . import htmlutil, mathml
@@ -42,6 +46,8 @@ MAX_ENTRIES = 20_000
 MAX_ENTRY_BYTES = 64_000_000          # one uncompressed member
 MAX_TOTAL_BYTES = 1_000_000_000       # all members, as declared
 MAX_TEXT_BYTES = 16_000_000           # one XML/XHTML member
+MAX_READ_BYTES = 200_000_000          # decompressed bytes read for one book
+MAX_NEST = 200                        # element nesting in a chapter
 MAX_RATIO = 200                       # uncompressed : compressed ...
 RATIO_FLOOR = 1_000_000               # ... but only past this size
 
@@ -66,6 +72,14 @@ class EpubError(Exception):
     """The file cannot be read as a book; the message is meant for the user."""
 
 
+class _Zip(zipfile.ZipFile):
+    """A ZipFile that totals the bytes actually decompressed from it."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.budget = MAX_READ_BYTES
+
+
 @dataclass
 class Chapter:
     href: str                  # path of its (first) document inside the zip
@@ -80,24 +94,32 @@ class Book:
     title: str = ""
     author: str = ""
     chapters: list[Chapter] = field(default_factory=list)
-    _zf: zipfile.ZipFile | None = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _asset_budget: int = field(default=0, repr=False)
+
+    def __post_init__(self):
+        self._asset_budget = MAX_READ_BYTES
 
     def read_asset(self, name: str) -> bytes | None:
-        """Bytes of a member (an image), or None if absent or too large."""
+        """Bytes of a member (an image), or None if absent or refused.
+
+        The file is opened and re-checked for every call and closed again, so
+        nothing stays open between syncs and a file swapped since it was
+        imported is held to the same limits as when it was opened.
+        """
         with self._lock:
             try:
-                if self._zf is None:
-                    self._zf = zipfile.ZipFile(self.path)
-                return _read(self._zf, name, MAX_ENTRY_BYTES)
+                with _Zip(self.path) as zf:
+                    _check_archive(zf)
+                    zf.budget = self._asset_budget
+                    data = _read(zf, name, MAX_ENTRY_BYTES)
+                    self._asset_budget = zf.budget
+                    return data
             except (EpubError, OSError, KeyError, zipfile.BadZipFile):
                 return None
 
     def close(self) -> None:
-        with self._lock:
-            if self._zf is not None:
-                self._zf.close()
-                self._zf = None
+        """Nothing is held open; kept so callers may treat a Book as a resource."""
 
 
 def file_sha256(path: str) -> str:
@@ -127,7 +149,7 @@ def _check_archive(zf: zipfile.ZipFile) -> None:
     if len(infos) > MAX_ENTRIES:
         raise EpubError(f"Refusing this file: {len(infos)} entries is more "
                         f"than a book should have")
-    total = 0
+    total = packed = 0
     for info in infos:
         if not _safe_name(info.filename):
             raise EpubError(f"Refusing this file: unsafe path "
@@ -143,12 +165,19 @@ def _check_archive(zf: zipfile.ZipFile) -> None:
             raise EpubError(f"Refusing this file: {info.filename!r} looks "
                             f"like a compression bomb")
         total += info.file_size
+        packed += max(1, info.compress_size)
         if total > MAX_TOTAL_BYTES:
             raise EpubError("Refusing this file: its contents are "
                             "implausibly large")
+    # Many members each under the per-member floor can still add up to a bomb.
+    if total > RATIO_FLOOR and total > MAX_RATIO * packed:
+        raise EpubError("Refusing this file: it looks like a compression bomb")
 
 
 def _read(zf: zipfile.ZipFile, name: str, limit: int) -> bytes:
+    budget = getattr(zf, "budget", None)
+    if budget is not None:
+        limit = min(limit, budget)
     try:
         with zf.open(name) as fh:
             data = fh.read(limit + 1)      # bounded whatever the header says
@@ -158,6 +187,8 @@ def _read(zf: zipfile.ZipFile, name: str, limit: int) -> bytes:
         raise EpubError(f"Cannot read {name} from the book: {exc}") from None
     if len(data) > limit:
         raise EpubError(f"Refusing this file: {name!r} is implausibly large")
+    if budget is not None:
+        zf.budget -= len(data)
     return data
 
 
@@ -165,13 +196,26 @@ def _read(zf: zipfile.ZipFile, name: str, limit: int) -> bytes:
 
 def _xml(data: bytes) -> ET.Element:
     # expat never fetches external entities; refusing declarations also
-    # closes the internal-entity expansion ("billion laughs") route.
-    if re.search(rb"<!ENTITY", data, re.I):
-        raise EpubError("Refusing this file: its metadata declares XML "
-                        "entities")
+    # closes the internal-entity expansion ("billion laughs") route. The check
+    # runs inside expat, after it has decoded the bytes, so no encoding
+    # (UTF-16, say) can hide a declaration from it.
+    refused = []
+
+    def refuse(*_args):
+        refused.append(True)
+        raise expat.ExpatError("entity declaration")
+
+    guard = expat.ParserCreate()
+    guard.EntityDeclHandler = refuse
+    guard.StartDoctypeDeclHandler = (
+        lambda _n, _s, _p, internal: refuse() if internal else None)
     try:
+        guard.Parse(data, True)
         return ET.fromstring(data)
-    except ET.ParseError as exc:
+    except (expat.ExpatError, ET.ParseError) as exc:
+        if refused:
+            raise EpubError("Refusing this file: its metadata declares XML "
+                            "entities") from None
         raise EpubError(f"The book's metadata is malformed: {exc}") from None
 
 
@@ -209,7 +253,7 @@ def _resolve(base: str, ref: str) -> str | None:
 
 def open_book(path: str) -> Book:
     try:
-        zf = zipfile.ZipFile(path)
+        zf = _Zip(path)
     except FileNotFoundError:
         raise EpubError(f"Book file not found: {path}") from None
     except zipfile.BadZipFile:
@@ -228,7 +272,11 @@ def open_book(path: str) -> Book:
         if not opf_path or opf_path not in names:
             raise EpubError("This is not a valid EPUB file (no package document)")
         opf = _xml(_read(zf, opf_path, MAX_TEXT_BYTES))
-        return _build(zf, names, path, opf_path, opf)
+        try:
+            return _build(zf, names, path, opf_path, opf)
+        except RecursionError:
+            raise EpubError("Refusing this file: its markup is nested "
+                            "implausibly deep") from None
 
 
 def _reject_drm(zf: zipfile.ZipFile, names: set[str]) -> None:
@@ -263,7 +311,7 @@ def _build(zf, names, path, opf_path, opf) -> Book:
     if spine_el is not None:
         for ref in _all(spine_el, "itemref"):
             item = manifest.get(ref.get("idref"))
-            if (item and item[0] in names
+            if (item and item[0] in names and item[0] not in spine
                     and ("xhtml" in item[1] or item[1] == "text/html")):
                 spine.append(item[0])
 
@@ -371,6 +419,18 @@ def _decode(raw: bytes) -> str:
     return UnicodeDammit(raw, is_html=True).unicode_markup or ""
 
 
+def _depth(root) -> int:
+    """Deepest element nesting under `root`, without recursion."""
+    deepest, stack = 0, [(root, 0)]
+    while stack:
+        node, d = stack.pop()
+        deepest = max(deepest, d)
+        for child in getattr(node, "children", ()):
+            if isinstance(child, Tag):
+                stack.append((child, d + 1))
+    return deepest
+
+
 def _prepare(raw: bytes, doc: str, names: set[str]):
     """Parse one chapter document and neutralise it for the sanitiser.
 
@@ -378,6 +438,9 @@ def _prepare(raw: bytes, doc: str, names: set[str]):
     """
     soup = htmlutil.parse(_decode(raw))
     body = soup.body or soup
+    if _depth(body) > MAX_NEST:
+        raise EpubError("Refusing this file: a chapter is nested "
+                        "implausibly deep")
     types = set((body.get("epub:type") or "").split())
     for sec in body.find_all(["section", "div"], recursive=False):
         types |= set((sec.get("epub:type") or "").split())
@@ -405,6 +468,18 @@ def _prepare(raw: bytes, doc: str, names: set[str]):
             if attr not in ("alt", "title", "width", "height"):
                 del img[attr]
         img["src"] = ASSET_PREFIX + target
+    # Nothing may make the reader fetch from the network: responsive image
+    # candidates (<picture>/<source>/srcset) are not followed, only the one
+    # local <img> stays.
+    for src in body.find_all("source"):
+        src.decompose()
+    for pic in body.find_all("picture"):
+        pic.unwrap()
+    for tag in body.find_all(True):
+        for attr in ("srcset", "sizes", "poster", "background", "data",
+                     "ping", "formaction"):
+            if attr in tag.attrs:
+                del tag[attr]
     for a in list(body.find_all("a")):
         href = (a.get("href") or "").strip()
         if href.lower().startswith(("http://", "https://", "mailto:")):
