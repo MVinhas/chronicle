@@ -227,6 +227,10 @@ wrong dates,
 [open an issue](https://github.com/MVinhas/chronicle/issues/new?labels=adapter-request)
 with the address and what looks wrong.
 
+Pasting an address with a path (`fs.blog/blog/`) no longer hides a site's own
+API: Chronicle checks the site root for WordPress or Ghost first. Works in
+Progress ships as a built-in recipe.
+
 ## Building it yourself
 
 ```sh
