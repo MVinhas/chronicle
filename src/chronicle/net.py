@@ -226,12 +226,19 @@ class _HostLimiter:
         self.interval = interval
         self._next: dict[str, float] = {}
         self._lock = threading.Lock()
+        # Hosts that asked, in robots.txt, to be visited no faster than this.
+        # A floor, applied after any scaling: a site's own request outranks
+        # our wish to finish a first build sooner.
+        self.min_gap: dict[str, float] = {}
+
+    def gap(self, host: str) -> float:
+        return max(self.interval, self.min_gap.get(host, 0.0))
 
     def wait(self, host: str) -> None:
         with self._lock:
             now = time.monotonic()
             slot = max(now, self._next.get(host, 0.0))
-            self._next[host] = slot + self.interval
+            self._next[host] = slot + self.gap(host)
         delay = slot - time.monotonic()
         if delay > 0:
             time.sleep(delay)
@@ -257,6 +264,81 @@ def set_rate_scale(factor: float) -> None:
     a sync that assigned its own would make the whole suite wait in real time.
     """
     _limiter.interval = max(0.0, _limiter.base * max(0.0, factor))
+
+
+# A Crawl-delay beyond this is treated as this: honouring a site's request is
+# polite, but a delay of minutes per page would make an archive unbuildable.
+CRAWL_DELAY_CAP = 30.0
+_CRAWL_TTL = 3600.0
+_crawl_checked: dict[str, float] = {}
+
+
+def parse_crawl_delay(robots: str) -> float | None:
+    """The Crawl-delay robots.txt asks of us (seconds), capped; None if none.
+
+    Our own user-agent group wins over `*`; other crawlers' groups are ignored.
+    """
+    groups: list[tuple[list[str], float | None]] = []
+    agents: list[str] = []
+    delay: float | None = None
+    last_was_agent = False
+    for raw in robots.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if ":" not in line:
+            continue
+        key, value = (x.strip() for x in line.split(":", 1))
+        key = key.lower()
+        if key == "user-agent":
+            if not last_was_agent:
+                if agents:
+                    groups.append((agents, delay))
+                agents, delay = [], None
+            agents.append(value.lower())
+            last_was_agent = True
+            continue
+        last_was_agent = False
+        if key == "crawl-delay":
+            try:
+                delay = max(0.0, float(value))
+            except ValueError:
+                pass
+    if agents:
+        groups.append((agents, delay))
+    for wanted in ("chronicle", "*"):
+        for names, d in groups:
+            if any(wanted in n for n in names if wanted != "*") or \
+                    (wanted == "*" and "*" in names):
+                if d is not None:
+                    return min(d, CRAWL_DELAY_CAP)
+    return None
+
+
+def apply_crawl_delay(url: str) -> None:
+    """Read the host's robots.txt (once an hour) and honour its Crawl-delay."""
+    host = urllib.parse.urlparse(url).netloc
+    if not host:
+        return
+    now = time.monotonic()
+    if now - _crawl_checked.get(host, -_CRAWL_TTL) < _CRAWL_TTL:
+        return
+    _crawl_checked[host] = now
+    scheme = urllib.parse.urlparse(url).scheme or "https"
+    try:
+        text = fetch(f"{scheme}://{host}/robots.txt", timeout=15, retries=1,
+                     max_bytes=200_000).text()
+    except FetchError:
+        _limiter.min_gap.pop(host, None)
+        return
+    delay = parse_crawl_delay(text)
+    if delay:
+        _limiter.min_gap[host] = delay
+    else:
+        _limiter.min_gap.pop(host, None)
+
+
+def reset_crawl_delays() -> None:
+    _crawl_checked.clear()
+    _limiter.min_gap.clear()
 
 
 def cancel_all() -> None:

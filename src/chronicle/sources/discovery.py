@@ -41,6 +41,8 @@ MAX_ARCHIVE_PAGES = 40
 NEWEST_ARCHIVE_PAGES = 3
 MAX_FEED_PAGES = 25
 MAX_SITEMAP_CHILDREN = 50
+# A feed body shorter than this is a teaser, not the article.
+SUMMARY_WORDS = 50
 
 FEED_HINTS = ("/feed", "/feed/", "/rss", "/rss.xml", "/atom.xml", "/index.xml",
               "/feed.xml", "/blog/feed")
@@ -55,7 +57,7 @@ _SKIP_SEGMENTS = re.compile(
     r"(/|$)", re.I)
 _ASSET_RE = re.compile(
     r"\.(jpe?g|png|gif|webp|svg|ico|pdf|zip|gz|mp[34]|mov|avi|xml|json|css|js|"
-    r"txt|woff2?|ttf|eot)$", re.I)
+    r"txt|woff2?|ttf|eot|rss|atom|opml|m4a|ogg|wav|epub)$", re.I)
 # A path that is ONLY a date is a date-archive listing, not a post.
 _DATE_ARCHIVE_RE = re.compile(r"^/\d{4}(/\d{1,2})?(/\d{1,2})?/?$")
 
@@ -81,7 +83,15 @@ class Candidate:
     @property
     def complete(self) -> bool:
         """Nothing a page fetch could add that we need for discovery."""
-        return bool(self.feed_html and self.date.known and self.title)
+        return bool(self.feed_html and self.date.known and self.title
+                    and not self.summary_only)
+
+    @property
+    def summary_only(self) -> bool:
+        """A feed body too short to be the article: a teaser ("6,100 words,
+        600 photos."). The page has to be read for the real thing."""
+        return bool(self.feed_html
+                    and htmlutil.word_count(self.feed_html) < SUMMARY_WORDS)
 
 
 @dataclass
@@ -256,6 +266,14 @@ def read_feed(feed_url: str, ctx, in_scope=lambda url: True) -> list[FeedItem]:
                 counted += 1
         if not fresh or (limit and counted >= limit):
             break
+        # A limited source's "fetch new posts" does not page a feed back
+        # through its whole history: a page of nothing but posts older than
+        # the archive holds means everything beyond it is older still.
+        if (getattr(ctx, "newest_only", False) and getattr(ctx, "limit", None)
+                and page_items
+                and all(it.date.known and ctx.below_floor(it.date)
+                        for it in page_items)):
+            break
         if next_url:
             url = net.absolutise(url, next_url)
         elif first_page_size >= 10:
@@ -312,6 +330,8 @@ def read_sitemaps(base: str, config: dict, ctx) -> tuple[list[str], str | None]:
         yield from robots_sitemaps(base)
         yield from SITEMAP_HINTS
 
+    if config.get("sitemap") == "":
+        return [], None          # looked before: this site publishes none
     tried: set[str] = set()
     for hint in hints():
         url = hint if hint.startswith("http") else base + hint
@@ -572,16 +592,24 @@ def _resolve_numeric_ensemble(numeric: list[tuple[str, int, int]],
 # merging
 # --------------------------------------------------------------------------
 
+def _same_site(url: str, host: str | None) -> bool:
+    if not host:
+        return True
+    return urlparse(url).netloc.lower().removeprefix("www.") == host
+
+
 def merge(feed_items: list[FeedItem], sitemap_urls: list[str],
           archive_entries: list[tuple[str, dates.PubDate]],
-          in_scope) -> dict[str, Candidate]:
+          in_scope, host: str | None = None) -> dict[str, Candidate]:
     """One candidate per canonical URL, holding the union of the evidence."""
     pool: dict[str, Candidate] = {}
     order = 0
 
+    host = host.lower().removeprefix("www.") if host else None
+
     def get(url: str) -> Candidate | None:
         nonlocal order
-        if not in_scope(url):
+        if not in_scope(url) or not _same_site(url, host):
             return None
         guid = net.canonical_url(url)
         cand = pool.get(guid)
@@ -607,6 +635,11 @@ def merge(feed_items: list[FeedItem], sitemap_urls: list[str],
         if cand is not None:
             cand.evidence.add("sitemap")
     for item in feed_items:
+        # A feed may link the site's own homepage, its feed, or an episode
+        # file: none of them is an article.
+        path = urlparse(item.link).path or "/"
+        if path == "/" or _ASSET_RE.search(path):
+            continue
         cand = get(item.link)
         if cand is None:
             continue
@@ -746,7 +779,23 @@ def extract_date(soup, url: str) -> dates.PubDate:
         d = dates.parse_freeform(text, confidence="medium", source="text:heading")
         if d.known:
             return d
+    # A clear "17 Sep 2019 / 00:54" timestamp near the top of a hand-built
+    # page is the only date some blogs ever print. Weak ('inferred'): the
+    # pattern is unmarked, so nothing here may outrank a real signal.
+    body = soup.body or soup
+    head_text = body.get_text(" ", strip=True)[:600]
+    m = _TEXT_TIMESTAMP_RE.search(head_text)
+    if m:
+        d = dates.parse_freeform(m.group(1), confidence="inferred",
+                                 source="text:timestamp")
+        if d.known and d.precision == "day":
+            return d
     return dates.UNKNOWN
+
+
+_TEXT_TIMESTAMP_RE = re.compile(
+    rf"\b(\d{{1,2}}\s+(?:{dates.MONTH_RE})\w*\s+\d{{4}})\s*[/|,·]\s*\d{{1,2}}:\d{{2}}\b",
+    re.I)
 
 
 def _iter_ld(data):

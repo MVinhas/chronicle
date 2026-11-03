@@ -9,6 +9,8 @@ unreliable.
 """
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 from .. import htmlutil, net
 from .base import Context, Source, Stub, probe_all
 from . import discovery
@@ -67,6 +69,11 @@ class GenericSource(Source):
                 ctx.say(f"{self.name}: {len(sitemap_urls)} pages in sitemap")
             if sitemap_src and sitemap_src != self.config.get("sitemap"):
                 ctx.config_updates["sitemap"] = sitemap_src
+            elif (not sitemap_src and homepage_html
+                  and self.config.get("sitemap") != ""):
+                # None found: remember it, as with the feed and the index, so
+                # a full scan does not pay six requests to learn it again.
+                ctx.config_updates["sitemap"] = ""
 
         # 3. Archive pages: always consulted — the site's own listing is both
         #    an enumeration and, on many blogs, the only place dates appear.
@@ -91,7 +98,7 @@ class GenericSource(Source):
             ctx.config_updates["index"] = index or ""
 
         pool = discovery.merge(feed_items, sitemap_urls, archive_entries,
-                               self.in_scope)
+                               self.in_scope, host=urlparse(base).netloc)
         report.candidates = len(pool)
         if ctx.limit and ctx.newest_only:
             pool = self._only_fresh(pool, ctx)
@@ -212,10 +219,13 @@ class GenericSource(Source):
         guid = net.canonical_url(resp.url)
         title = cand.title or htmlutil.clean_title(
             htmlutil.page_title(soup), self.name)
+        # A teaser in the feed is not the article: the page is.
+        use_feed = bool(cand.feed_html) and not cand.summary_only
         return Stub(guid=guid, url=resp.url, title=title, date=date,
-                    source_order=cand.order, raw_html=cand.feed_html or html,
+                    source_order=cand.order,
+                    raw_html=cand.feed_html if use_feed else html,
                     base_url=resp.url,
-                    content_source="feed" if cand.feed_html else "direct")
+                    content_source="feed" if use_feed else "direct")
 
     def _is_article(self, cand: Candidate, soup) -> bool:
         """Is an undated page still a post? Structured signals first, then —

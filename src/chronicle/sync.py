@@ -303,6 +303,8 @@ class Syncer:
                 return
 
         source = sources.build(row, config)
+        if row["plugin"] != "epub" and (row["homepage"] or "").startswith("http"):
+            net.apply_crawl_delay(row["homepage"])
 
         # What this source already has, so discovery can skip what is settled
         # instead of paying one request per already-archived article.

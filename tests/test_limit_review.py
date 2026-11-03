@@ -25,6 +25,14 @@ class TestIncrementalKeepsCap(LimitHarness):
         self.assertEqual(len(self.urls()), 50)
         self.assertEqual(fn.count("/post-"), 0)
 
+    def test_a_paged_feed_is_not_walked_back_through_its_history(self):
+        fn = _feed_site(247)
+        run_sync(fn, self.dbfile, spec=_generic_spec(50))
+        fn.requests.clear()
+        run_sync(fn, self.dbfile, spec=_generic_spec(50), newest_only=True)
+        self.assertLessEqual(fn.count("/feed/"), 2)
+        self.assertEqual(len(self.urls()), 50)
+
     def test_genuinely_new_posts_are_still_added(self):
         fn = _feed_site(100, per_page=200)
         run_sync(fn, self.dbfile, spec=_generic_spec(10))
