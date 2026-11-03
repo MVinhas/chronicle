@@ -52,8 +52,9 @@ flatpak install flathub io.github.mvinhas.Chronicle
 
 Then open **Blogs**, paste in a blog address, and press **Full archive scan**.
 
-The first run takes a while — it's fetching a blog's entire history, and it
-goes slowly on purpose so as not to hammer anyone's website. After that,
+The first run takes a while — a new blog starts with its last 50 posts (see
+[How far back](#how-far-back-a-blog-goes)), and it goes slowly on purpose so as
+not to hammer anyone's website. After that,
 **Fetch new posts** picks up only what's appeared since, which takes seconds.
 
 <div align="center">
@@ -197,6 +198,27 @@ supply the file, and nothing is downloaded from any website.
   another update is running is imported when that update finishes.
 - The file is treated as untrusted: it is read in memory with size limits,
   scripts are never run and external references are never followed.
+
+## How far back a blog goes
+
+A blog you add follows its **last 50 posts**, so a site with thousands of
+entries doesn't become a long download you never asked for. Books are always
+imported whole, and blogs added before this option existed keep their whole
+archive.
+
+Change it per blog with **Limit…** in the Blogs list (pick a number, or
+**All posts**), or from the command line:
+
+```sh
+chronicle add https://example.com --limit 200     # or --limit all
+chronicle set-limit example 200                   # or: set-limit example all
+```
+
+The limit only decides how far back Chronicle *fetches*. Lowering it never
+deletes anything already in your library, and **Fetch new posts** always adds
+every new post, however many there are. To go further back, raise the limit
+(or choose **All posts**) and then press **Full archive scan** — it fetches the
+posts the new limit now reaches that you don't hold yet.
 
 ## Keeping up to date
 
