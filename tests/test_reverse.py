@@ -54,7 +54,8 @@ class TestReadingDirection(unittest.TestCase):
     def test_queue_newest_first_keeps_undated_last(self):
         self.messy()
         got = self.names(self.db.queue(self.conn, newest_first=True))
-        self.assertEqual(got, ["c", "t3", "t2", "t1", "a", "u2", "u1"])
+        # Undated articles read ascending in both directions (see db.py).
+        self.assertEqual(got, ["c", "t3", "t2", "t1", "a", "u1", "u2"])
 
     def test_neighbour_matches_the_listing_in_both_directions(self):
         ids = self.messy()
@@ -79,11 +80,48 @@ class TestReadingDirection(unittest.TestCase):
         self.assertEqual(self.db.neighbour(
             self.conn, ids["c"], +1, newest_first=True)["id"], ids["t3"])
         self.assertEqual(self.db.neighbour(
-            self.conn, ids["a"], +1, newest_first=True)["id"], ids["u2"])
+            self.conn, ids["a"], +1, newest_first=True)["id"], ids["u1"])
         self.assertIsNone(self.db.neighbour(
-            self.conn, ids["u1"], +1, newest_first=True))
+            self.conn, ids["u2"], +1, newest_first=True))
         self.assertIsNone(self.db.neighbour(
             self.conn, ids["c"], -1, newest_first=True))
+
+    def test_undated_books_read_contiguously_and_ascending_in_both_modes(self):
+        """Two undated sources must not interleave, and a book never reads
+        backwards: undated rows sort by (source_id, source_order, id)."""
+        book1 = self.db.add_source(self.conn, "b1", "Book 1", "epub", "/b1")
+        book2 = self.db.add_source(self.conn, "b2", "Book 2", "epub", "/b2")
+        self.add("dated", "2002-01-01T00:00:00")
+        ids = []
+        # Insert interleaved and shuffled so id order cannot fake the answer.
+        for sid, n in ((book2, 3), (book1, 2), (book2, 1), (book1, 3),
+                       (book2, 2), (book1, 1)):
+            aid, _ = self.db.upsert_article(
+                self.conn, sid, f"s{sid}-{n}", url=f"https://x/{sid}/{n}",
+                title=f"s{sid}-ch{n}", published_at=None,
+                date_precision="unknown", date_confidence="unknown",
+                date_source="", source_order=n)
+            self.conn.execute(
+                "UPDATE articles SET content_status='ok', content_html='x' "
+                "WHERE id=?", (aid,))
+        want = ["dated"] + [f"s{b}-ch{n}" for b in (book1, book2)
+                            for n in (1, 2, 3)]
+        for newest in (False, True):
+            rows = self.db.queue(self.conn, newest_first=newest)
+            self.assertEqual(self.names(rows), want, f"newest={newest}")
+            order = [r["id"] for r in rows]
+            for i, aid in enumerate(order):
+                nxt = self.db.neighbour(self.conn, aid, +1, newest_first=newest)
+                prv = self.db.neighbour(self.conn, aid, -1, newest_first=newest)
+                self.assertEqual(nxt["id"] if nxt else None,
+                                 order[i + 1] if i + 1 < len(order) else None)
+                self.assertEqual(prv["id"] if prv else None,
+                                 order[i - 1] if i else None)
+                self.assertEqual(self.db.position_in_queue(
+                    self.conn, aid, newest_first=newest), (i + 1, len(order)))
+        self.db.set_read(self.conn, order[0], True)
+        self.assertEqual(self.db.resume_article(
+            self.conn, newest_first=True)["title"], f"s{book1}-ch1")
 
     def test_default_is_still_oldest_first(self):
         ids = self.messy()

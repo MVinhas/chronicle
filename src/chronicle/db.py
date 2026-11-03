@@ -582,10 +582,6 @@ JOIN sources s ON s.id = a.source_id
 LEFT JOIN reading_state r ON r.article_id = a.id
 """
 
-ORDER_CHRONO = " ORDER BY (a.published_at IS NULL), a.published_at ASC, a.source_order ASC, a.id ASC"
-ORDER_CHRONO_DESC = " ORDER BY (a.published_at IS NULL), a.published_at DESC, a.source_order DESC, a.id DESC"
-
-
 # Scopes that "hide read articles" must leave alone.
 #
 # Read: hiding read articles from the list of read articles empties it, which
@@ -647,7 +643,7 @@ def queue(conn, scope: str = "all", limit: int = 500, offset: int = 0,
     if search:
         where += " AND a.id IN (SELECT rowid FROM articles_fts WHERE articles_fts MATCH ?)"
         args.append(_fts_query(search))
-    order = ORDER_CHRONO_DESC if newest_first else ORDER_CHRONO
+    order = _sequence_order(newest_first, True)
     q = QUEUE_SELECT + where + order + " LIMIT ? OFFSET ?"
     return conn.execute(q, args + [limit, offset]).fetchall()
 
@@ -705,23 +701,41 @@ def set_reading_newest_first(conn, newest_first: bool) -> None:
 def _sequence_cmp(cur, newest_first: bool, after: bool) -> tuple[str, list]:
     """SQL for "comes after (or before) `cur` in the reading sequence".
 
-    The sequence is (undated-rank, published_at, source_order, id): undated
-    articles are last in *both* directions, and only the tail of the key flips
-    when reading newest first. The comparison is strictly lexicographic, so
-    ties on date and source_order fall through to the id.
+    The sequence has two groups, dated then undated (undated is last in *both*
+    directions):
+
+    * dated:   (published_at, source_order, id), flipped when reading newest
+      first;
+    * undated: (source_id, source_order, id), ALWAYS ascending.
+
+    The undated rule exists for books. An undated source has no chronology to
+    reverse, so its own order is the only meaningful one: a book reads chapter
+    1..N whichever way the dated blogs are read, and two undated sources stay
+    contiguous (grouped by source) instead of interleaving. Comparisons are
+    strictly lexicographic, so the final tie always falls to the id, and this
+    must stay identical to `_sequence_order` (queue, neighbour, position and
+    resume all rely on it).
     """
     nullrank = 1 if cur["published_at"] is None else 0
-    pub = cur["published_at"]
-    # Within the dated/undated group, "after" means larger when reading
-    # oldest first and smaller when reading newest first.
-    gt = after != newest_first
-    op = ">" if gt else "<"
     nr_op = ">" if after else "<"
-    cmp = (f"((a.published_at IS NULL) {nr_op} ?) OR ((a.published_at IS NULL) = ? AND ("
-           f"COALESCE(a.published_at,'') {op} COALESCE(?,'') OR (COALESCE(a.published_at,'') = COALESCE(?,'') AND ("
+    if nullrank:
+        op = ">" if after else "<"
+        cmp = (f"(a.published_at IS NULL AND (a.source_id {op} ? OR "
+               f"(a.source_id = ? AND (a.source_order {op} ? OR "
+               f"(a.source_order = ? AND a.id {op} ?)))))")
+        # Dated rows precede undated ones, so they count as "before".
+        if not after:
+            cmp = f"(a.published_at IS NOT NULL OR {cmp})"
+        sid, order = cur["source_id"], cur["source_order"]
+        return cmp, [sid, sid, order, order, cur["id"]]
+    pub = cur["published_at"]
+    # Within the dated group, "after" means larger when reading oldest first
+    # and smaller when reading newest first.
+    op = ">" if after != newest_first else "<"
+    cmp = (f"((a.published_at IS NULL) {nr_op} 0) OR (a.published_at IS NOT NULL AND ("
+           f"a.published_at {op} ? OR (a.published_at = ? AND ("
            f"a.source_order {op} ? OR (a.source_order = ? AND a.id {op} ?)))))")
-    return cmp, [nullrank, nullrank, pub, pub,
-                 cur["source_order"], cur["source_order"], cur["id"]]
+    return cmp, [pub, pub, cur["source_order"], cur["source_order"], cur["id"]]
 
 
 def _sequence_order(newest_first: bool, forward: bool) -> str:
@@ -729,8 +743,11 @@ def _sequence_order(newest_first: bool, forward: bool) -> str:
     dated_desc = (newest_first and forward) or (not newest_first and not forward)
     d = "DESC" if dated_desc else "ASC"
     nr = "ASC" if forward else "DESC"
+    u = "ASC" if forward else "DESC"      # undated: never follows newest_first
+    undated = lambda col: f"CASE WHEN a.published_at IS NULL THEN {col} END {u}"
     return (f" ORDER BY (a.published_at IS NULL) {nr}, a.published_at {d}, "
-            f"a.source_order {d}, a.id {d}")
+            f"{undated('a.source_id')}, {undated('a.source_order')}, "
+            f"{undated('a.id')}, a.source_order {d}, a.id {d}")
 
 
 def neighbour(conn, article_id: int, direction: int, scope: str = "all",
