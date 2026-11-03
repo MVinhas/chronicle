@@ -374,7 +374,7 @@ class SourcesView(Gtk.Box):
 
     def _book_present(self, name: str) -> bool:
         self.window.toasts.add_toast(Adw.Toast(
-            title=f"{name} is already in your library", timeout=5))
+            title=GLib.markup_escape_text(f"{name} is already in your library"), timeout=5))
         return False
 
     def open_add_dialog(self) -> None:
@@ -403,7 +403,7 @@ class SourcesView(Gtk.Box):
         if response != "add":
             return
         url = entry.get_text().strip()
-        toast = Adw.Toast(title=f"Inspecting {url}…", timeout=3)
+        toast = Adw.Toast(title=GLib.markup_escape_text(f"Inspecting {url}…"), timeout=3)
         self.window.toasts.add_toast(toast)
         threading.Thread(target=self._detect_and_add, args=(url,), daemon=True).start()
 
@@ -432,7 +432,7 @@ class SourcesView(Gtk.Box):
     def _added(self, spec, error, kind: str = "blog") -> bool:
         if error or spec is None:
             self.window.toasts.add_toast(
-                Adw.Toast(title=f"Could not add that {kind}: {error}", timeout=6))
+                Adw.Toast(title=GLib.markup_escape_text(f"Could not add that {kind}: {error}"), timeout=6))
             return False
         self.reload()
         self.emit("library-changed")
@@ -440,11 +440,13 @@ class SourcesView(Gtk.Box):
             # A book is local and quick: read it straight away rather than
             # asking, and only that book.
             self.window.toasts.add_toast(Adw.Toast(
-                title=f"Added {spec['name']} — importing its chapters…",
+                title=GLib.markup_escape_text(
+                    f"Added {spec['name']} — importing its chapters…"),
                 timeout=5))
             self.emit("sync-requested", [spec["book_id"]], True)
             return False
-        title = f"Added {spec['name']} — via {spec['detected']}"
+        title = GLib.markup_escape_text(
+            f"Added {spec['name']} — via {spec['detected']}")
         toast = Adw.Toast(title=title, button_label="Build archive",
                           timeout=12 if spec.get("partial") else 8)
         # A blog just added has no history at all, so this is the full scan.

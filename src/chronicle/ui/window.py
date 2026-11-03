@@ -75,6 +75,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.syncer = sync.Syncer(on_progress=self._on_sync_progress)
 
         self._quiet_sync = False
+        self._queued_sources: list[int] = []      # books added mid-sync
 
         self._load_css()
         self._build_ui()
@@ -795,8 +796,16 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_sync_requested(self, _widget, source_ids, full_scan: bool) -> None:
         if self.syncer.running:
-            self.toasts.add_toast(Adw.Toast(title="An update is already running",
-                                            timeout=3))
+            if source_ids:
+                # Added while another update runs: it goes next, not nowhere.
+                self._queued_sources.extend(
+                    i for i in source_ids if i not in self._queued_sources)
+                self.toasts.add_toast(Adw.Toast(
+                    title="Another update is running; the new book will be "
+                          "imported when it finishes", timeout=5))
+            else:
+                self.toasts.add_toast(Adw.Toast(
+                    title="An update is already running", timeout=3))
             return
         self._quiet_sync = False
         self.sync_button.set_sensitive(False)
@@ -864,6 +873,17 @@ class MainWindow(Adw.ApplicationWindow):
                 self.toasts.add_toast(Adw.Toast(title=prog.message, timeout=5))
             if self.current is None and not quiet:
                 self.resume()
+            if self._queued_sources:
+                GLib.timeout_add(300, self._run_queued_sources)
+        return False
+
+    def _run_queued_sources(self) -> bool:
+        if not self._queued_sources:
+            return False
+        if self.syncer.running:
+            return True                           # not quite finished: retry
+        ids, self._queued_sources = self._queued_sources, []
+        self._on_sync_requested(None, ids, True)
         return False
 
     def refresh_library(self) -> None:

@@ -187,9 +187,14 @@ supply the file, and nothing is downloaded from any website.
   it is already in your library. Pressing **Fetch new posts** or **Full
   archive scan** on a book is cheap: the original is re-read only if its
   content changed, and then the chapters are updated in place, keeping read
-  state, notes and highlights. Chapters the new file no longer has are
-  removed, unless you annotated or favourited them. If the original has gone
-  the update says it used the stored copy.
+  state, notes and highlights. If the new edition renames its internal files
+  (EPUB 2 to EPUB 3, say), chapters are matched to the old ones by title and
+  your state moves across; a chapter that cannot be matched is removed only if
+  you never read, annotated or favourited it. A changed original that cannot
+  be read leaves the stored copy in use. If the original has gone the update
+  says it used the stored copy. Books are matched by title, so a new edition
+  that retitles every chapter starts those chapters afresh. A book added while
+  another update is running is imported when that update finishes.
 - The file is treated as untrusted: it is read in memory with size limits,
   scripts are never run and external references are never followed.
 
