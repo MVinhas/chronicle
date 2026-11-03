@@ -133,6 +133,17 @@ class Context:
             return -1
         return k[2] if len(k) > 2 else 0
 
+    def below_floor(self, date) -> bool:
+        """In newest_only mode, is this date too old to be new?
+
+        Like `predates_archive` but with the same safety margin `since()`
+        uses, so a post dated a little before the newest one held (a site's
+        UTC offset, a backdated post) is still considered.
+        """
+        floor = self.since()
+        return bool(floor and date is not None and getattr(date, "known", False)
+                    and date.iso is not None and date.iso < floor)
+
     def predates_archive(self, date) -> bool:
         """In newest_only mode, is this date older than everything we hold?
 
@@ -291,6 +302,10 @@ class Source:
         return html
 
     # -- helpers -----------------------------------------------------------
+
+    # True for adapters that apply ctx.limit themselves at discovery; the
+    # Syncer then streams their stubs instead of buffering them to rank.
+    honours_limit = False
 
     @property
     def path_prefix(self) -> str:

@@ -214,7 +214,7 @@ class FeedItem:
     html: str | None
 
 
-def read_feed(feed_url: str, ctx) -> list[FeedItem]:
+def read_feed(feed_url: str, ctx, in_scope=lambda url: True) -> list[FeedItem]:
     """Read a feed and, where the site supports it, its older pages too.
 
     WordPress serves the archive through ``/feed/?paged=N``; some Atom feeds
@@ -228,7 +228,10 @@ def read_feed(feed_url: str, ctx) -> list[FeedItem]:
     first_page_size = 0
     # Feeds list newest first, so under a "last N posts" limit the first N
     # items are the ones wanted and older pages are never requested.
-    limit = getattr(ctx, "limit", None)
+    # "Fetch new posts" must see every new post, so it is not capped; and
+    # only items inside the source's scope count toward the cap.
+    limit = None if getattr(ctx, "newest_only", False) else getattr(ctx, "limit", None)
+    counted = 0
 
     for page in range(1, MAX_FEED_PAGES + 1):
         if url is None:
@@ -249,7 +252,9 @@ def read_feed(feed_url: str, ctx) -> list[FeedItem]:
             seen.add(key)
             items.append(it)
             fresh += 1
-        if not fresh or (limit and len(items) >= limit):
+            if in_scope(it.link):
+                counted += 1
+        if not fresh or (limit and counted >= limit):
             break
         if next_url:
             url = net.absolutise(url, next_url)
@@ -627,10 +632,24 @@ def newest(pool: dict[str, Candidate], limit: int) -> dict[str, Candidate]:
     one (in the site's own order). Candidates already archived count toward
     the limit like any other; they are simply not fetched again later."""
     by_site = sorted(pool.values(), key=lambda c: c.order)
-    dated = sorted((c for c in by_site if c.date.known),
-                   key=lambda c: c.date.iso, reverse=True)
-    ranked = dated + [c for c in by_site if not c.date.known]
-    return {c.guid: c for c in ranked[:limit]}
+
+    def when(c: Candidate) -> str | None:
+        # A permalink's date is good enough to rank by (it is never stored
+        # from here; the page itself decides the stored date).
+        return c.date.iso or dates.parse_from_url(c.url).iso
+
+    dated = sorted((c for c in by_site if when(c)), key=when, reverse=True)
+    undated = [c for c in by_site if not when(c)]
+    # A sitemap says nothing of dates, but its direction can be read off the
+    # candidates it shares with a dated route: if later positions are newer
+    # it lists oldest first, and the newest undated ones are at its end.
+    anchors = [c for c in by_site if "sitemap" in c.evidence and when(c)]
+    ascending = (len(anchors) >= 2
+                 and when(anchors[-1]) > when(anchors[0]))
+    if ascending:
+        undated.sort(key=lambda c: (("sitemap" in c.evidence
+                                     and "archive" not in c.evidence), -c.order))
+    return {c.guid: c for c in (dated + undated)[:limit]}
 
 
 def probe_order(pool: dict[str, Candidate]) -> list[Candidate]:

@@ -144,6 +144,32 @@ def newest_stubs(stubs, limit: int, known: dict | None) -> list:
     return [s for s in stubs if id(s) in top or s.guid in (known or {})]
 
 
+def honour_limit(stubs, limit: int | None, known: dict | None, honours: bool):
+    """Hold discovery to the limit: stream when the adapter applied it
+    itself, otherwise buffer and keep only the newest N."""
+    if not limit or honours:
+        return stubs
+    return newest_stubs(stubs, limit, known)
+
+
+def fresh_stubs(stubs, ctx, known: dict | None):
+    """For "fetch new posts" under a limit: new posts are always added, but
+    an old one resurfacing (a feed that lists its whole history) is not.
+    A stub is kept if already stored or not older than what we hold (with
+    the usual margin); undated unknown ones are capped at the limit."""
+    undated = 0
+    for s in stubs:
+        if s.guid in (known or {}):
+            yield s
+        elif s.date.known:
+            if not ctx.below_floor(s.date):
+                yield s
+        else:
+            undated += 1
+            if undated <= (ctx.limit or 0):
+                yield s
+
+
 def _newest_ids(conn, source_id: int, limit: int) -> set[int]:
     """Ids of the source's newest `limit` stored articles (undated last)."""
     rows = conn.execute(
@@ -190,6 +216,10 @@ class Syncer:
         self._running = False
         self.on_progress = on_progress or (lambda p: None)
         self.browser_fetch = browser_fetch
+        # Articles whose stored title was made from their URL slug, and so
+        # may be replaced by the page's own heading. A title the site really
+        # gave must never be touched, even when it happens to equal the slug.
+        self._slug_titled: set[int] = set()
 
     # -- control -----------------------------------------------------------
 
@@ -312,7 +342,7 @@ class Syncer:
         # "Last N posts" bounds how far back a scan reaches. Not for books,
         # which always import whole, and not for "fetch new posts", which must
         # add every new post however many there are.
-        limit = (None if incremental or row["plugin"] == "epub"
+        limit = (None if row["plugin"] == "epub"
                  else sources.config_limit(config))
 
         new_rejects: list[str] = []
@@ -334,8 +364,10 @@ class Syncer:
             # Scope is enforced here as well as in the adapter, so a source
             # scoped to one section can never quietly pull in the whole site.
             found = (s for s in source.discover(ctx) if source.in_scope(s.url))
-            if limit:
-                found = newest_stubs(found, limit, known)
+            if limit and incremental:
+                found = fresh_stubs(found, ctx, known)
+            else:
+                found = honour_limit(found, limit, known, source.honours_limit)
             for stub in found:
                 if self.should_stop():
                     break
@@ -344,6 +376,8 @@ class Syncer:
                 article_id, created = self._record(conn, row["id"], stub)
                 if created:
                     prog.new += 1
+                if stub.extra.get("slug_title"):
+                    self._slug_titled.add(article_id)
                 if fetch_content:
                     need = conn.execute(
                         "SELECT content_status FROM articles WHERE id=?",
@@ -379,8 +413,7 @@ class Syncer:
             # Hints the source learned (where the feed and archive index
             # live) save the next sync the same search.
             if ctx.config_updates:
-                db.set_source_config(conn, row["id"],
-                                     {**config, **ctx.config_updates})
+                db.merge_source_config(conn, row["id"], ctx.config_updates)
 
         if fetch_content and not self.should_stop():
             # Also pick up anything left unfetched by earlier runs — a stub
@@ -559,7 +592,8 @@ class Syncer:
                 excerpt=htmlutil.make_excerpt(html),
                 content_hash=htmlutil.content_hash(html))
             prog.fetched += 1
-            self._maybe_title(conn, article_id, row_now, url)
+            if article_id in self._slug_titled:
+                self._maybe_title(conn, article_id, row_now, url)
         else:
             db.mark_content_error(conn, article_id, f"{status}:{content.source}")
             prog.failed += 1

@@ -213,18 +213,53 @@ class TestGenericLimit(LimitHarness):
         fn.add(f"{BASE}/sitemap.xml", sitemap_xml(urls))
         fn.add(BASE + "/", "<html><head><title>B</title></head></html>")
         run_sync(fn, self.dbfile, spec=_generic_spec(5))
-        # Nothing orders an undated pool, so which five is arbitrary, but
-        # the cap holds.
+        # Nothing dates the pool, so which five is arbitrary, but the cap
+        # holds.
         self.assertEqual(len(self.urls()), 5)
+
+    def test_permalink_dates_rank_an_undated_sitemap(self):
+        fn = FakeNet()
+        urls = []
+        for i in range(30):          # oldest first, as sitemaps often are
+            u = f"{BASE}/2016/01/{i + 1:02d}/p-{i}/"
+            fn.add(u, post_html(f"P {i}", _day(i) + "+00:00"))
+            urls.append(u)
+        fn.add(f"{BASE}/robots.txt", f"Sitemap: {BASE}/sitemap.xml\n")
+        fn.add(f"{BASE}/sitemap.xml", sitemap_xml(urls))
+        fn.add(BASE + "/", "<html><head><title>B</title></head></html>")
+        run_sync(fn, self.dbfile, spec=_generic_spec(5))
+        self.assertEqual(self.slugs(), [f"p-{i}" for i in range(25, 30)])
+
+    def test_sitemap_direction_is_learned_from_the_dated_feed(self):
+        """A short feed dates the newest posts; the sitemap (oldest first,
+        undated) then fills the rest from its *end*, not its start."""
+        fn = FakeNet()
+        urls = []
+        for i in range(100):
+            u = f"{BASE}/p-{i}/"
+            fn.add(u, post_html(f"P {i}", _day(i) + "+00:00"))
+            urls.append(u)
+        items = [{"link": f"{BASE}/p-{i}/", "title": f"P {i}", "date": _rfc(i),
+                  "content": False} for i in reversed(range(90, 100))]
+        fn.add(f"{BASE}/feed/", rss_xml(BASE, items))
+        fn.add(f"{BASE}/robots.txt", f"Sitemap: {BASE}/sitemap.xml\n")
+        fn.add(f"{BASE}/sitemap.xml", sitemap_xml(urls))
+        fn.add(BASE + "/", '<html><head><title>B</title><link rel="alternate" '
+               'type="application/rss+xml" href="/feed/"></head></html>')
+        run_sync(fn, self.dbfile, spec=_generic_spec(20))
+        self.assertEqual(self.slugs(), sorted(f"p-{i}" for i in range(80, 100)))
 
     def test_the_cap_is_not_applied_to_a_routine_update(self):
         fn = _feed_site(40)
         run_sync(fn, self.dbfile, spec=_generic_spec(5))
-        fn2 = _feed_site(70, start=35)     # 30 new posts appear
+        # The feed now lists its whole history again plus 30 new posts: the
+        # new ones are added, the old tail is neither stored nor probed.
+        fn2 = _feed_site(70)
         prog = run_sync(fn2, self.dbfile, spec=_generic_spec(5),
                         newest_only=True)
         self.assertEqual(prog.new, 30)
         self.assertEqual(len(self.urls()), 35)
+        self.assertEqual(fn2.count("/post-"), 30)
 
 
 class TestSafetyNet(LimitHarness):
@@ -277,7 +312,8 @@ class TestLimitConfig(LimitHarness):
                       {"limit": 3})
         conn.close()
         with mock.patch.object(db, "connect", lambda path=None: self.conn()), \
-                mock.patch.object(sync, "Context", spy):
+                mock.patch.object(sync, "Context", spy), \
+                self.assertLogs("chronicle.sync", level="ERROR"):
             sync.Syncer().sync_all(cache_images=False)
         self.assertIn("limit", seen)
         self.assertIsNone(seen["limit"])

@@ -18,6 +18,7 @@ PAGE_SIZE = 50
 
 class WordPressSource(Source):
     plugin_id = "wordpress"
+    honours_limit = True
     display_name = "WordPress site"
     content_selectors = [".entry-content", ".post-content", "article .content",
                          ".wp-block-post-content", "article", "main"]
@@ -59,8 +60,12 @@ class WordPressSource(Source):
                 break
             if total is None:
                 total = int(resp.headers.get("x-wp-total", 0)) or None
-                ctx.say(f"{self.name}: {total or 'unknown'} posts to "
-                        f"{'check' if since else 'import'}")
+                if limit and total:
+                    ctx.say(f"{self.name}: importing the latest "
+                            f"{min(limit, total)} of {total} posts")
+                else:
+                    ctx.say(f"{self.name}: {total or 'unknown'} posts to "
+                            f"{'check' if since else 'import'}")
 
             for post in posts:
                 if post.get("status") not in (None, "publish"):

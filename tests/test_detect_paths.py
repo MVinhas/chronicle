@@ -77,10 +77,13 @@ class TestSiteName(unittest.TestCase):
     def test_homepage_name_beats_page_title(self):
         fn = FakeNet()
         fn.add(BASE + "/", "<html><title>Quiet Place | Home</title></html>")
+        fn.add(f"{BASE}/archive/", "<html><title>Archive - Quiet Place</title></html>")
         fn.add(f"{BASE}/journal/", "<html><title>Journal - Quiet Place</title></html>")
         with fn.patched():
-            spec = detect(BASE + "/journal/")
-        self.assertEqual(spec["name"], "Quiet Place")
+            # A conventional listing path is the whole site...
+            self.assertEqual(detect(BASE + "/archive/")["name"], "Quiet Place")
+            # ...a real section is named after itself.
+            self.assertEqual(detect(BASE + "/journal/")["name"], "Journal")
 
 
 class TestDiscoveryHelpers(unittest.TestCase):
@@ -177,7 +180,7 @@ class TestWorksInProgress(SyncHarness):
                             (s, got))
         for j in ("/issue-05/", "/print/", "/nop/"):
             self.assertEqual(fn.count(WIP + j), 0, j)
-        self.assertTrue(all(r[2] == "ok" or r[2] for r in rows))
+        self.assertEqual({r[2] for r in rows}, {"ok"})
 
 
 if __name__ == "__main__":

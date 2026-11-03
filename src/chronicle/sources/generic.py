@@ -17,6 +17,7 @@ from .discovery import Candidate, Report, extract_date  # noqa: F401 (re-export)
 
 class GenericSource(Source):
     plugin_id = "generic"
+    honours_limit = True
     display_name = "Website"
 
     # -- discovery ---------------------------------------------------------
@@ -35,7 +36,7 @@ class GenericSource(Source):
         feed_url = discovery.find_feed_url(base, homepage_html, self.config, ctx)
         if feed_url:
             ctx.say(f"{self.name}: reading feed…")
-            feed_items = discovery.read_feed(feed_url, ctx)
+            feed_items = discovery.read_feed(feed_url, ctx, self.in_scope)
             report.feed_url, report.feed_count = feed_url, len(feed_items)
         # Remember where the feed lives — or, when the site was reachable,
         # that there is none — so later syncs skip the search.
@@ -55,7 +56,9 @@ class GenericSource(Source):
         # named the newest N; the sitemap and the deep archive could only add
         # older ones, so they are not read.
         feed_covers_limit = bool(
-            ctx.limit and sum(1 for it in feed_items if it.date.known) >= ctx.limit)
+            ctx.limit and sum(1 for it in feed_items
+                              if it.date.known and self.in_scope(it.link))
+            >= ctx.limit)
         if not ctx.newest_only and not feed_covers_limit:
             sitemap_urls, sitemap_src = discovery.read_sitemaps(
                 base, self.config, ctx)
@@ -78,7 +81,7 @@ class GenericSource(Source):
             base, self.config, ctx, self.in_scope, is_known=already_known,
             max_pages=(discovery.NEWEST_ARCHIVE_PAGES
                        if ctx.newest_only or feed_covers_limit else None),
-            admit=self.scope_by_membership if self.path_prefix else None)
+            admit=self._admit())
         report.archive_index = index
         report.archive_count = len(archive_entries)
         if archive_entries:
@@ -90,7 +93,9 @@ class GenericSource(Source):
         pool = discovery.merge(feed_items, sitemap_urls, archive_entries,
                                self.in_scope)
         report.candidates = len(pool)
-        if ctx.limit and len(pool) > ctx.limit:
+        if ctx.limit and ctx.newest_only:
+            pool = self._only_fresh(pool, ctx)
+        elif ctx.limit and len(pool) > ctx.limit:
             pool = discovery.newest(pool, ctx.limit)
         ctx.result_note = report.summary()
 
@@ -141,6 +146,35 @@ class GenericSource(Source):
                 continue
             yielded.add(stub.guid)
             yield stub
+
+    def _admit(self):
+        """Membership scoping, only for a source whose configured index IS its
+        section (a category or tag page whose posts live at the site root).
+        A recipe that scopes by prefix but happens to have found an unrelated
+        archive index must not have every link of that index admitted."""
+        if not self.path_prefix:
+            return None
+        index = (self.config.get("index") or "").rstrip("/")
+        return self.scope_by_membership if index == self.path_prefix else None
+
+    @staticmethod
+    def _only_fresh(pool, ctx):
+        """Under a limit, "fetch new posts" keeps what is already held and
+        what is not older than the archive; an old post that merely resurfaces
+        (a feed listing its whole history) is not probed. Undated unknowns are
+        capped at the limit."""
+        out, undated = {}, 0
+        for guid, cand in pool.items():
+            if guid in (ctx.known or {}):
+                out[guid] = cand
+            elif cand.date.known:
+                if not ctx.below_floor(cand.date):
+                    out[guid] = cand
+            else:
+                undated += 1
+                if undated <= ctx.limit:
+                    out[guid] = cand
+        return out
 
     # -- probing -----------------------------------------------------------
 

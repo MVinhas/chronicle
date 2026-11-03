@@ -78,7 +78,11 @@ class GhostSource(Source):
                 break
             if total is None:
                 total = (data.get("meta", {}).get("pagination", {}) or {}).get("total")
-                ctx.say(f"{self.name}: {total or '?'} posts to import")
+                if limit and total:
+                    ctx.say(f"{self.name}: importing the latest "
+                            f"{min(limit, total)} of {total} posts")
+                else:
+                    ctx.say(f"{self.name}: {total or '?'} posts to import")
             for post in posts:
                 if limit and order >= limit:
                     return
@@ -123,7 +127,8 @@ class GhostSource(Source):
             # lastmod is a modification time, not a publication date: only a hint.
             yield Stub(guid=net.canonical_url(url), url=url,
                        title=url.rstrip("/").rsplit("/", 1)[-1].replace("-", " ").title(),
-                       date=dates.UNKNOWN, source_order=order)
+                       date=dates.UNKNOWN, source_order=order,
+                       extra={"slug_title": True})
 
     def fetch_content(self, ctx: Context, url: str, stub_html=None, base_url=None,
                       extra: dict | None = None) -> Content:

@@ -419,6 +419,23 @@ def set_source_config(conn, source_id: int, config: dict) -> None:
                  (json.dumps(config), source_id))
 
 
+def merge_source_config(conn, source_id: int, updates: dict) -> None:
+    """Fold `updates` into the config as stored *now*.
+
+    A sync learns hints (where the feed lives) minutes after it read the
+    config; writing back its own copy would revert anything changed meanwhile,
+    such as a limit the user set during the sync.
+    """
+    row = conn.execute("SELECT config FROM sources WHERE id=?",
+                       (source_id,)).fetchone()
+    try:
+        config = json.loads(row["config"] or "{}") if row else {}
+    except json.JSONDecodeError:
+        config = {}
+    config.update(updates)
+    set_source_config(conn, source_id, config)
+
+
 def set_source_limit(conn, source_id: int, limit: int | None) -> None:
     """Set how many recent posts to follow; None removes the limit.
 

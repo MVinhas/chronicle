@@ -30,6 +30,9 @@ class DetectError(Exception):
 # Newly added blogs follow the last 50 posts. Sources saved before the limit
 # existed have no "limit" key and stay unlimited; books are never limited.
 DEFAULT_LIMIT = 50
+# Anything above this is a typo, and an unbounded number buys nothing: no blog
+# has this many posts. Rejected on input, ignored if found in stored config.
+MAX_LIMIT = 100_000
 
 
 def parse_limit(text: str) -> int | None:
@@ -41,15 +44,17 @@ def parse_limit(text: str) -> int | None:
         value = int(text)
     except ValueError:
         raise ValueError(f"expected a positive number or 'all', got {text!r}")
-    if value < 1:
-        raise ValueError(f"expected a positive number or 'all', got {text!r}")
+    if not 1 <= value <= MAX_LIMIT:
+        raise ValueError(f"expected a number from 1 to {MAX_LIMIT} or 'all', "
+                         f"got {text!r}")
     return value
 
 
 def config_limit(config: dict | None) -> int | None:
     """The limit stored in a source's config; absent or unusable means all."""
     value = (config or {}).get("limit")
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+    if isinstance(value, bool) or not isinstance(value, int) \
+            or not 1 <= value <= MAX_LIMIT:
         return None
     return value
 
@@ -157,8 +162,15 @@ def detect(url: str) -> dict:
     # its archive page is simply wrong. The page title is only a fallback for
     # a homepage that gives nothing. The bare hostname is the last resort:
     # truncating at the first dot turns nav.al into "Nav".
+    section = parsed.path.rstrip("/")
+    # A conventional listing path (/blog, /archive) means "everything this
+    # site publishes"; any other path is a section the user chose.
+    is_section = bool(section) and section.lower() not in _LISTING_PATHS
     name = _site_title_from(home_html)
-    if not name and parsed.path.rstrip("/"):
+    if is_section:
+        # A section is its own thing: "Essays", not the name of the whole site.
+        name = _site_title_from(_fetch_quiet(url)) or name
+    elif not name and section:
         name = _site_title_from(_fetch_quiet(url))
     name = name or host.replace("www.", "")
 
@@ -177,26 +189,31 @@ def detect(url: str) -> dict:
         config["feed"] = feed_link
 
     # APIs live at the site root, so they are probed first even when the user
-    # pasted a path: /blog/ or /archive/ on a WordPress or Ghost site should
-    # still read the publisher's own post list, not scrape an index page.
+    # pasted a conventional listing path: /blog/ or /archive/ on a WordPress
+    # or Ghost site should still read the publisher's own post list, not
+    # scrape an index page. A real section (/category/essays/, /labs/robotics/)
+    # is NOT the root API's business -- it would import the whole site under
+    # the section's name -- so only a WordPress *installed at that path*
+    # (multisite) is taken over by an API; otherwise the section stays generic.
     # 1. WordPress REST API -- every post, publisher timestamps, full bodies.
+    api_base = base + section if is_section else base
     for path in _WP_PATHS:
         try:
-            resp = net.fetch(base + path, headers={"Accept": "application/json"},
+            resp = net.fetch(api_base + path, headers={"Accept": "application/json"},
                              timeout=25, retries=2)
         except net.FetchError:
             continue
         if resp.status == 200 and resp.body.strip().startswith(b"["):
             total = resp.headers.get("x-wp-total")
-            root = (f"{base}/wp-json/wp/v2" if path.startswith("/wp-json")
-                    else f"{base}/?rest_route=/wp/v2")
+            root = (f"{api_base}/wp-json/wp/v2" if path.startswith("/wp-json")
+                    else f"{api_base}/?rest_route=/wp/v2")
             return {"plugin": "wordpress", "name": name, "homepage": base,
                     "config": {"api_root": root}, "partial": False,
                     "detected": f"WordPress REST API"
                                 f"{f' ({total} posts)' if total else ''}"}
 
     # 2. Ghost -- the front end embeds its own public content key.
-    if home_html:
+    if home_html and not is_section:
         m = _GHOST_KEY_RE.search(home_html)
         if m and ("ghost" in home_html.lower() or "/ghost/api/" in home_html):
             return {"plugin": "ghost", "name": name, "homepage": base,
@@ -208,7 +225,6 @@ def detect(url: str) -> dict:
     # (ribbonfarm.com/archive/ and the like). Those enumerate posts that live
     # all over the site, not under that path, so scoping to it would reject
     # every post the index actually finds.
-    section = parsed.path.rstrip("/")
     if section and section not in ("", "/"):
         cfg = dict(config, strategy="archive", index=section + "/")
         if section.lower() in _LISTING_PATHS:

@@ -26,7 +26,7 @@ def _limit_editor(initial: int | None):
     """
     group = Adw.PreferencesGroup()
     every = Adw.SwitchRow(title="All posts", active=initial is None)
-    spin = Adw.SpinRow.new_with_range(1, 10000, 1)
+    spin = Adw.SpinRow.new_with_range(1, sources.MAX_LIMIT, 1)
     spin.set_title("Last posts to follow")
     spin.set_value(initial or sources.DEFAULT_LIMIT)
     spin.set_sensitive(initial is not None)
@@ -239,7 +239,7 @@ class SourcesView(Gtk.Box):
 
             if src["plugin"] != "epub":          # books always import whole
                 limit_btn = Gtk.Button(
-                    icon_name="view-list-symbolic", valign=Gtk.Align.CENTER,
+                    label="Limit…", valign=Gtk.Align.CENTER,
                     css_classes=["flat"],
                     tooltip_text="Choose how many recent posts to follow")
                 limit_btn.connect("clicked", self._on_limit, src, limit)
